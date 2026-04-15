@@ -46,6 +46,8 @@ services:
         condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      disable: true
 
 volumes:
   redis_data:

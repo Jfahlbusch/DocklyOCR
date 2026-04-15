@@ -1,0 +1,50 @@
+{% if keys %}
+<table class="w-full text-sm">
+  <thead class="bg-slate-50 border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+    <tr>
+      <th class="px-5 py-3">Prefix</th>
+      <th class="px-5 py-3">Name</th>
+      <th class="px-5 py-3">Last used</th>
+      <th class="px-5 py-3">Status</th>
+      <th class="px-5 py-3">Created</th>
+      <th class="px-5 py-3 text-right">Action</th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-slate-100">
+    {% for key in keys %}
+    <tr>
+      <td class="px-5 py-3 font-mono text-xs text-slate-600">{{ key.key_prefix }}&hellip;</td>
+      <td class="px-5 py-3 text-slate-900">{{ key.name }}</td>
+      <td class="px-5 py-3 text-slate-500 tnum">
+        {% if key.last_used_at %}{{ key.last_used_at.strftime("%Y-%m-%d %H:%M") }}{% else %}—{% endif %}
+      </td>
+      <td class="px-5 py-3">
+        {% if key.is_active %}
+          <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 mr-1.5"></span><span class="text-slate-700">active</span>
+        {% else %}
+          <span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1.5"></span><span class="text-slate-500">revoked</span>
+        {% endif %}
+      </td>
+      <td class="px-5 py-3 text-slate-500 tnum">{{ key.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td class="px-5 py-3 text-right">
+        {% if key.is_active %}
+        <button
+          type="button"
+          hx-post="/admin/customers/{{ customer.id }}/keys/{{ key.id }}/revoke"
+          hx-target="#keys-table"
+          hx-swap="innerHTML"
+          hx-confirm="Revoke this API key? Existing clients using it will start receiving 401 responses."
+          class="bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium px-3 py-1.5 rounded-md">
+          Revoke
+        </button>
+        {% else %}
+        <span class="text-xs text-slate-400">—</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="px-5 py-8 text-sm text-slate-500 text-center">No API keys yet. Create one with "+ New Key".</div>
+{% endif %}

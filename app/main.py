@@ -1,11 +1,14 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import httpx
+from arq.connections import RedisSettings, create_pool
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
+from app.middleware import ContentLengthLimitMiddleware
+from app.routers import admin, jobs, ocr
 
 OPENAPI_TAGS = [
     {"name": "ocr", "description": "Submit files for OCR processing (sync or async)."},
@@ -17,7 +20,17 @@ OPENAPI_TAGS = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
+    try:
+        app.state.arq_pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    except Exception:
+        app.state.arq_pool = None
+    try:
+        yield
+    finally:
+        pool = getattr(app.state, "arq_pool", None)
+        if pool is not None:
+            with suppress(Exception):
+                await pool.aclose()
 
 
 app = FastAPI(
@@ -51,6 +64,16 @@ app.add_middleware(
     same_site="lax",
     https_only=False,
 )
+
+app.add_middleware(
+    ContentLengthLimitMiddleware,
+    max_bytes=settings.max_upload_bytes,
+)
+
+
+app.include_router(ocr.router, prefix="/v1")
+app.include_router(jobs.router, prefix="/v1")
+app.include_router(admin.router)
 
 
 async def _check_ollama() -> str:

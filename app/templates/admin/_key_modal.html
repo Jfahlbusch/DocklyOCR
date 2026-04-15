@@ -1,0 +1,30 @@
+<div class="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50" id="key-modal">
+  <div class="bg-white border border-slate-200 rounded-md shadow-sm max-w-2xl w-full">
+    <div class="px-6 py-4 border-b border-slate-200">
+      <h3 class="font-semibold text-slate-900">API Key Created</h3>
+    </div>
+    <div class="px-6 py-5">
+      <div class="border-l-4 border-rose-500 bg-rose-50 text-rose-800 text-sm p-3 rounded-md mb-4">
+        This key will only be shown once. Copy it now.
+      </div>
+      <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Label</div>
+      <div class="font-medium text-slate-900 mb-3">{{ key_name }}</div>
+      <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Plaintext API key</div>
+      <pre class="bg-slate-900 text-emerald-300 text-xs font-mono p-4 rounded-md overflow-x-auto select-all whitespace-pre-wrap break-all" id="new-key-value">{{ plaintext }}</pre>
+      <div class="flex gap-3 mt-4">
+        <button
+          type="button"
+          onclick="navigator.clipboard.writeText(document.getElementById('new-key-value').textContent); this.textContent='Copied ✓'; setTimeout(() => this.textContent='Copy to clipboard', 2000);"
+          class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded-md">
+          Copy to clipboard
+        </button>
+        <button
+          type="button"
+          onclick="document.getElementById('key-modal').remove(); window.location.reload();"
+          class="border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm px-4 py-2 rounded-md">
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+</div>

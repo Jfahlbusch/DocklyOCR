@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Jobs — DocklyOCR{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-6">Jobs</h1>
+
+<div class="bg-white border border-slate-200 rounded-md shadow-sm mb-4">
+  <div class="px-5 py-4 flex flex-wrap items-end gap-4">
+    <div>
+      <label class="block text-xs uppercase tracking-wide text-slate-500 mb-1" for="filter-status">Status</label>
+      <select
+        id="filter-status"
+        name="status"
+        hx-get="/admin/jobs"
+        hx-trigger="change"
+        hx-target="#jobs-table"
+        hx-swap="innerHTML"
+        hx-include="[name='status'],[name='customer_id']"
+        class="border border-slate-200 rounded-md px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-indigo-600">
+        <option value="" {% if not selected_status %}selected{% endif %}>All</option>
+        {% for s in statuses %}
+        <option value="{{ s }}" {% if selected_status == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs uppercase tracking-wide text-slate-500 mb-1" for="filter-customer">Customer</label>
+      <select
+        id="filter-customer"
+        name="customer_id"
+        hx-get="/admin/jobs"
+        hx-trigger="change"
+        hx-target="#jobs-table"
+        hx-swap="innerHTML"
+        hx-include="[name='status'],[name='customer_id']"
+        class="border border-slate-200 rounded-md px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-indigo-600">
+        <option value="" {% if selected_customer_id is none %}selected{% endif %}>All</option>
+        {% for c in customers %}
+        <option value="{{ c.id }}" {% if selected_customer_id == c.id %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+</div>
+
+<div id="jobs-table" class="bg-white border border-slate-200 rounded-md shadow-sm">
+  {% include "admin/_jobs_table.html" %}
+</div>
+{% endblock %}

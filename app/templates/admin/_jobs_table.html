@@ -1,0 +1,28 @@
+{% if jobs %}
+<table class="w-full text-sm">
+  <thead class="bg-slate-50 border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+    <tr>
+      <th class="px-5 py-3">Job ID</th>
+      <th class="px-5 py-3">Customer</th>
+      <th class="px-5 py-3">Format</th>
+      <th class="px-5 py-3">Status</th>
+      <th class="px-5 py-3">Pages</th>
+      <th class="px-5 py-3">Created</th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-slate-100">
+    {% for job in jobs %}
+    <tr>
+      <td class="px-5 py-3 font-mono text-xs text-slate-600">{{ job.id[:12] }}&hellip;</td>
+      <td class="px-5 py-3 text-slate-900">{{ job.customer_name }}</td>
+      <td class="px-5 py-3 text-slate-600">{{ job.output_format }}</td>
+      <td class="px-5 py-3">{% include "admin/_status_dot.html" %}<span class="text-slate-700">{{ job.status }}</span></td>
+      <td class="px-5 py-3 text-slate-600 tnum">{{ job.page_count if job.page_count is not none else "—" }}</td>
+      <td class="px-5 py-3 text-slate-500 tnum">{{ job.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="px-5 py-8 text-sm text-slate-500 text-center">No jobs match the filters.</div>
+{% endif %}

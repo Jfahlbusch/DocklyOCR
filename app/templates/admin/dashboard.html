@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — DocklyOCR{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-6">Dashboard</h1>
+
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+  <div class="bg-white border border-slate-200 rounded-md shadow-sm p-5">
+    <div class="text-xs uppercase tracking-wide text-slate-500">Customers</div>
+    <div class="text-3xl font-semibold text-slate-900 mt-2 tnum">{{ customer_count }}</div>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-md shadow-sm p-5">
+    <div class="text-xs uppercase tracking-wide text-slate-500">Jobs today</div>
+    <div class="text-3xl font-semibold text-slate-900 mt-2 tnum">{{ jobs_today }}</div>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-md shadow-sm p-5">
+    <div class="text-xs uppercase tracking-wide text-slate-500">Jobs / 7d</div>
+    <div class="text-3xl font-semibold text-slate-900 mt-2 tnum">{{ jobs_week }}</div>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-md shadow-sm p-5">
+    <div class="text-xs uppercase tracking-wide text-slate-500">Jobs / 30d</div>
+    <div class="text-3xl font-semibold text-slate-900 mt-2 tnum">{{ jobs_month }}</div>
+  </div>
+</div>
+
+<div class="bg-white border border-slate-200 rounded-md shadow-sm">
+  <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+    <h2 class="font-semibold text-slate-900">Recent Jobs</h2>
+    <a href="/admin/jobs" class="text-sm text-indigo-600 hover:text-indigo-700">View all</a>
+  </div>
+  {% if recent_jobs %}
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+      <tr>
+        <th class="px-5 py-3">Job ID</th>
+        <th class="px-5 py-3">Customer</th>
+        <th class="px-5 py-3">Format</th>
+        <th class="px-5 py-3">Status</th>
+        <th class="px-5 py-3">Pages</th>
+        <th class="px-5 py-3">Created</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      {% for job in recent_jobs %}
+      <tr>
+        <td class="px-5 py-3 font-mono text-xs text-slate-600">{{ job.id[:12] }}&hellip;</td>
+        <td class="px-5 py-3 text-slate-900">{{ job.customer_name }}</td>
+        <td class="px-5 py-3 text-slate-600">{{ job.output_format }}</td>
+        <td class="px-5 py-3">{% include "admin/_status_dot.html" %}<span class="text-slate-700">{{ job.status }}</span></td>
+        <td class="px-5 py-3 text-slate-600 tnum">{{ job.page_count if job.page_count is not none else "—" }}</td>
+        <td class="px-5 py-3 text-slate-500 tnum">{{ job.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="px-5 py-8 text-sm text-slate-500 text-center">No jobs yet.</div>
+  {% endif %}
+</div>
+{% endblock %}

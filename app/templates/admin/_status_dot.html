@@ -1,0 +1,6 @@
+{%- set _status = job.status if job is defined else status -%}
+{%- set color = "bg-slate-400" -%}
+{%- if _status == "done" -%}{%- set color = "bg-emerald-500" -%}{%- endif -%}
+{%- if _status in ("pending", "processing") -%}{%- set color = "bg-amber-500" -%}{%- endif -%}
+{%- if _status == "failed" -%}{%- set color = "bg-rose-500" -%}{%- endif -%}
+<span class="inline-block w-2 h-2 rounded-full {{ color }} mr-1.5"></span>

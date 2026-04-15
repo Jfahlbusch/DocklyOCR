@@ -28,7 +28,7 @@ from app.models import AdminUser, ApiKey, Customer, Job, JobStatus
 # Router + template engine
 # ---------------------------------------------------------------------------
 
-router = APIRouter(tags=["admin"])
+router = APIRouter(tags=["admin"], include_in_schema=False)
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))

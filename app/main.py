@@ -9,12 +9,32 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import settings
 from app.middleware import ContentLengthLimitMiddleware
 from app.routers import admin, jobs, ocr
+from app.schemas import HealthResponse
 
 OPENAPI_TAGS = [
-    {"name": "ocr", "description": "Submit files for OCR processing (sync or async)."},
-    {"name": "jobs", "description": "Inspect job status and download results."},
-    {"name": "admin", "description": "Admin UI for managing customers and API keys."},
-    {"name": "health", "description": "Service health and readiness probes."},
+    {
+        "name": "ocr",
+        "description": (
+            "Submit PDFs or images for text extraction. Supports sync (wait for "
+            "result) and async (webhook/poll) modes. All endpoints require "
+            "`X-API-Key` authentication."
+        ),
+    },
+    {
+        "name": "jobs",
+        "description": (
+            "Inspect job status, fetch result files, and list past jobs. Scoped "
+            "to the caller's API key. All endpoints require `X-API-Key` "
+            "authentication."
+        ),
+    },
+    {
+        "name": "health",
+        "description": (
+            "Operational health probe. Public (no auth), intended for load "
+            "balancers and uptime monitors."
+        ),
+    },
 ]
 
 
@@ -100,7 +120,18 @@ async def _check_db() -> str:
         return "unreachable"
 
 
-@app.get("/health", tags=["health"], summary="Service health probe")
+@app.get(
+    "/health",
+    tags=["health"],
+    summary="Service health probe",
+    description=(
+        "Returns the combined readiness status of the API, its database, and "
+        "the Ollama backend. Public endpoint: no authentication required. "
+        "Intended for load balancers, uptime monitors, and Kubernetes "
+        "readiness probes."
+    ),
+    response_model=HealthResponse,
+)
 async def health():
     ollama_status = await _check_ollama()
     db_status = await _check_db()

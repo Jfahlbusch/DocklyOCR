@@ -23,6 +23,7 @@ from app.auth import ApiKeyContext, enforce_rate_limit
 from app.config import settings
 from app.db import get_session
 from app.models import Job, JobStatus, OutputFormat
+from app.schemas import ErrorResponse, OcrAsyncResponse
 from app.services.formatters import format_output
 from app.services.ocr_pipeline import run_ocr
 from app.services.storage import storage
@@ -57,7 +58,139 @@ def _result_filename(original: str, extension: str) -> str:
     return f"{stem}.{extension}"
 
 
-@router.post("/ocr", summary="Submit a file for OCR processing")
+_OCR_DESCRIPTION = """
+Submit a PDF or image document to the DocklyOCR pipeline and receive the
+extracted text in the requested format.
+
+The endpoint supports two execution modes selected via the ``mode`` form
+field:
+
+* **``mode=sync``** — runs the 13-strategy pipeline in-process and returns
+  the rendered result body directly with the format-appropriate
+  ``Content-Type``. Best for small documents where you want to block on
+  the result.
+* **``mode=async``** *(default)* — enqueues a background job and returns
+  ``202 Accepted`` with a ``job_id`` and ``status_url``. Poll
+  ``GET /v1/jobs/{job_id}`` or provide a ``webhook_url`` for push
+  notification once processing finishes.
+
+**Accepted content types:** ``application/pdf``, ``image/jpeg``,
+``image/png``, ``image/tiff``. Other types are rejected with ``415``.
+
+**Upload size limit:** 100 MB per request. Larger bodies are rejected with
+``413`` before the pipeline runs.
+
+**Output formats** (``output_format`` form field): ``md`` (Markdown),
+``txt`` (plain text), ``toon`` (TOON tree notation), ``json`` (structured
+pipeline result). The sync response's ``Content-Type`` reflects the chosen
+format.
+
+**Webhook delivery (async mode):** if ``webhook_url`` is supplied, the
+worker POSTs the final job payload to that URL on completion. Delivery is
+retried with exponential backoff; inspect ``webhook_delivered`` and
+``webhook_attempts`` on the job detail endpoint.
+
+**Authentication:** every request must include a valid ``X-API-Key``
+header. Requests are rate-limited per API key (see platform configuration
+for the current quota).
+"""
+
+
+@router.post(
+    "/ocr",
+    summary="Submit a document for OCR processing",
+    description=_OCR_DESCRIPTION,
+    response_model=None,
+    responses={
+        202: {
+            "description": (
+                "Async job accepted — poll ``GET /v1/jobs/{job_id}`` or wait for the "
+                "configured webhook. Returned when ``mode=async``."
+            ),
+            "model": OcrAsyncResponse,
+            "content": {
+                "application/json": {
+                    "example": {
+                        "job_id": "7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a",
+                        "status": "pending",
+                        "status_url": "/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a",
+                    }
+                }
+            },
+        },
+        200: {
+            "description": (
+                "Sync OCR result. Content type and body shape depend on "
+                "``output_format``. Returned when ``mode=sync``."
+            ),
+            "content": {
+                "text/markdown": {"example": "## Seite 1\n\nHello world\n"},
+                "text/plain": {"example": "Hello world\n"},
+                "application/json": {
+                    "example": {
+                        "meta": {"page_count": 2, "pages_ok": 2, "pages_failed": 0},
+                        "pages": [
+                            {"number": 1, "text": "Hello world", "strategy": "150dpi/1024px"},
+                            {"number": 2, "text": "Second page", "strategy": "200dpi/1600px"},
+                        ],
+                    }
+                },
+                "application/x-toon": {
+                    "example": "document:\n  meta:\n    page_count: 2\n  pages:\n    - number: 1\n      text: Hello world\n"
+                },
+            },
+        },
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid ``output_format`` value.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Invalid output_format 'yaml'. Must be one of: md, txt, toon, json"
+                    }
+                }
+            },
+        },
+        401: {
+            "model": ErrorResponse,
+            "description": "Missing or invalid ``X-API-Key`` header.",
+            "content": {"application/json": {"example": {"detail": "Invalid or inactive API key"}}},
+        },
+        413: {
+            "model": ErrorResponse,
+            "description": "Upload exceeds the configured size limit.",
+            "content": {
+                "application/json": {
+                    "example": {"error": "Payload too large", "max_bytes": 104857600}
+                }
+            },
+        },
+        415: {
+            "model": ErrorResponse,
+            "description": "Uploaded file has an unsupported media type.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": (
+                            "Unsupported media type 'text/plain'. Allowed: "
+                            "['application/pdf', 'image/jpeg', 'image/png', 'image/tiff']"
+                        )
+                    }
+                }
+            },
+        },
+        429: {
+            "model": ErrorResponse,
+            "description": "Rate limit exceeded for this API key.",
+            "content": {"application/json": {"example": {"detail": "Rate limit exceeded"}}},
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": "Async queue is unavailable (Redis/ARQ not ready).",
+            "content": {"application/json": {"example": {"detail": "Queue unavailable"}}},
+        },
+    },
+)
 async def submit_ocr(
     request: Request,
     file: UploadFile = File(...),  # noqa: B008 -- FastAPI dep pattern

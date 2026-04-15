@@ -1,0 +1,37 @@
+"""Subprocess entry for the OCR pipeline.
+
+Run via:
+    python -m app.services.ocr_runner --input <path> --tmp-dir <path> --output-json <path>
+
+Isolates Ollama crashes from the ARQ worker process: if the pipeline (or the
+underlying Ollama call) segfaults, only this subprocess dies — the worker
+catches ``CalledProcessError`` / ``TimeoutExpired`` and continues serving jobs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from app.services.ocr_pipeline import run_ocr
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="DocklyOCR pipeline subprocess runner")
+    parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--tmp-dir", required=True, type=Path)
+    parser.add_argument("--output-json", required=True, type=Path)
+    args = parser.parse_args()
+
+    args.tmp_dir.mkdir(parents=True, exist_ok=True)
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
+
+    result = run_ocr(args.input, args.tmp_dir)
+    args.output_json.write_text(json.dumps(result.to_json_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

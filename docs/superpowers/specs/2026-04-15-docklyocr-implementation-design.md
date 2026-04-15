@@ -107,13 +107,16 @@ subprocess.run(
 
 `app/services/ocr_runner.py` ist ein schmaler CLI-Wrapper, der `run_ocr()` aufruft und das `OcrResult` als JSON serialisiert. Wenn Ollama crasht: Subprozess stirbt, Worker fängt `CalledProcessError`/`TimeoutExpired`, setzt Job-Status auf `failed`, lebt selbst weiter.
 
-### 3.3 Ollama außerhalb des Containers
+### 3.3 Ollama auf Host, nicht öffentlich erreichbar
 
-- Ollama läuft auf dem **Host** (GPU + bereits gezogenes Modell `glm-ocr:latest`)
-- `docker-compose.yml` deklariert `extra_hosts: ["host.docker.internal:host-gateway"]` für Linux-Kompatibilität
-- `.env`: `OLLAMA_URL=http://host.docker.internal:11434`
-- `/health`-Endpunkt macht einen 2-Sekunden-Timeout-Ping auf Ollama und nennt im Response separat `ollama: "ok"` / `"unreachable"`
-- **Für PRD:** Der User wird Ollama **nicht** installieren. Lösung: `OLLAMA_URL` zeigt dann auf einen externen Dienst (z. B. `http://ollama.interne-vpn:11434`). Der Code unterscheidet nicht — es ist ausschließlich eine ENV-Config.
+**Architekturentscheidung:** Ollama läuft auf demselben Host wie die API (lokal & PRD), bindet sich aber ausschließlich an `127.0.0.1:11434`. Nach außen ist **nur** der DocklyOCR-API-Port (via Reverse-Proxy) erreichbar. Das glm-ocr-Modell wird nie direkt von Clients gesprochen.
+
+- **Ollama-Prozess:** läuft außerhalb von Docker (systemd-Service oder `ollama serve`). Grund: GPU-Durchreichung aus dem Container ist fragil, und Ollama auf dem Host erlaubt einfache Modell-Verwaltung (`ollama pull`, `ollama list`).
+- **Binding:** Ollama lauscht default auf `127.0.0.1:11434` — **nicht** exponieren, keine Port-Weiterleitung, kein Firewall-Loch
+- **Container-Zugriff:** `docker-compose.yml` deklariert `extra_hosts: ["host.docker.internal:host-gateway"]` für Linux-Kompatibilität. API-Container reicht `OLLAMA_URL=http://host.docker.internal:11434` in den Prozess.
+- **Health-Check:** `/health`-Endpunkt macht einen 2-Sekunden-Timeout-Ping auf Ollama und meldet separat `ollama: "ok"` / `"unreachable"`
+- **Reverse-Proxy (Caddy/Nginx):** forwardet **ausschließlich** Port `8000` (API) nach außen — Port `11434` ist nie im Caddyfile
+- **PRD-Setup:** Identisch zu lokal — `curl -fsSL https://ollama.com/install.sh | sh` → `ollama pull glm-ocr` → `systemctl enable ollama` → `docker compose up -d`. Keine Environment-Unterscheidung nötig.
 
 ### 3.4 Upload-Size-Limit
 

@@ -12,7 +12,7 @@
 set -euo pipefail
 
 IDLE_FILE="/tmp/dockly-last-activity"
-IDLE_THRESHOLD_SECONDS=900  # 15 minutes
+IDLE_THRESHOLD_SECONDS=120  # 2 minutes
 
 # Check if any jobs are currently processing
 PROCESSING=$(curl -sf http://localhost:8000/v1/jobs?status=processing 2>/dev/null \

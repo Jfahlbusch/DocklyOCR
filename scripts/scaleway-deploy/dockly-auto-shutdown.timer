@@ -2,9 +2,9 @@
 Description=Check DocklyOCR GPU idle every 5 minutes
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=5min
-AccuracySec=1min
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=30s
 
 [Install]
 WantedBy=timers.target

@@ -77,6 +77,10 @@ cp scripts/scaleway-deploy/dockly-auto-shutdown.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now dockly-auto-shutdown.timer
 
+echo "=== 8/8 Setup daily cleanup cron (delete jobs older than 7 days) ==="
+CRON_LINE="0 3 * * * cd /opt/dockly-ocr && .venv-host/bin/python scripts/cleanup_old_results.py --delete --days 7 >> /var/log/dockly-cleanup.log 2>&1"
+(crontab -l 2>/dev/null | grep -v "cleanup_old_results" ; echo "$CRON_LINE") | crontab -
+
 echo ""
 echo "=== DONE ==="
 echo "API:    http://$(hostname -I | awk '{print $1}'):8000"

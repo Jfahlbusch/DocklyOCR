@@ -157,15 +157,15 @@ async def process_ocr_job(ctx, job_id: str) -> str:
         if not success:
             await _schedule_webhook_retry(ctx, job_id)
 
-    # Proactive GPU shutdown when queue is empty.
-    # Small delay: let ARQ finish its own Redis bookkeeping for this job
-    # before we check zcard (would otherwise see phantom markers).
-    import asyncio
-
-    await asyncio.sleep(3)
-    with contextlib.suppress(Exception):
-        await shutdown_gpu_if_idle(ctx.get("redis"))
-
+    # GPU shutdown is handled by the GPU-side safety timer (5 min idle).
+    # Proactive shutdown from the worker is disabled because of a race:
+    # between job N returning and job N+1 being picked up, the queue
+    # momentarily appears empty → GPU shutdown would fire → next job
+    # would see a dead backend.
+    #
+    # Trade-off: each batch run leaves the GPU powered on for up to 5
+    # minutes after the last job. Acceptable given that cold-start would
+    # cost ~3 minutes anyway.
     return "done"
 
 

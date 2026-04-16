@@ -422,10 +422,11 @@ def _detect_columns(img_path: Path) -> bool:
             if diff > best_diff:
                 best_diff = diff
 
-        # Threshold 25: only trigger on clear multi-column layouts. Raised from
-        # 15 to reduce false positives (wide-margin pages). Missed multi-column
-        # pages still get caught by column-split fallback after normal strategies.
-        return best_diff > 25
+        # Threshold 15: separates single-column (~3) from multi-column (~25+).
+        # Deliberately generous — catching false positives is cheaper than
+        # missing real multi-column pages (which would fail OCR entirely on
+        # insurance documents with tight column gutters).
+        return best_diff > 15
     except Exception:
         return False
 
@@ -579,7 +580,7 @@ def _is_pdf(path: Path) -> bool:
     return path.suffix.lower() == ".pdf"
 
 
-MAX_PARALLEL_PAGES: int = 6  # concurrent pages sent to Ollama
+MAX_PARALLEL_PAGES: int = 4  # concurrent pages sent to Ollama (proven quality)
 
 
 def _process_single_page(img_path: Path, page_num: int, tmp_dir: Path) -> PageResult:

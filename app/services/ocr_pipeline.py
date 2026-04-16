@@ -421,9 +421,8 @@ def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) ->
         work_path = tmp_dir / f"pg{page_num}.jpg"
         img = Image.open(src_image).convert("RGB")
         img.save(work_path, "JPEG", quality=95)
-        _resize_image_inplace(work_path, 1024)
+        # No resize before column split — halves need full width for OCR
         left_path, right_path = split_page_columns(work_path, tmp_dir, page_num)
-        # Do NOT cleanup here — left/right images are still needed for OCR
         work_path.unlink(missing_ok=True)
 
         left_text, left_ok, _ = try_ocr(left_path)

@@ -423,11 +423,13 @@ def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) ->
         img.save(work_path, "JPEG", quality=95)
         _resize_image_inplace(work_path, 1024)
         left_path, right_path = split_page_columns(work_path, tmp_dir, page_num)
-        _cleanup_page_tmpfiles(tmp_dir, page_num)
+        # Do NOT cleanup here — left/right images are still needed for OCR
+        work_path.unlink(missing_ok=True)
 
         left_text, left_ok, _ = try_ocr(left_path)
         right_text, right_ok, _ = try_ocr(right_path)
 
+        # Cleanup split images after OCR
         for f in [left_path, right_path]:
             with contextlib.suppress(OSError):
                 f.unlink()

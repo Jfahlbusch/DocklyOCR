@@ -96,6 +96,30 @@ app.include_router(jobs.router, prefix="/v1")
 app.include_router(admin.router)
 
 
+# Scalar API reference — modern UI that actually supports multi-file upload
+# (Swagger UI's "Try it out" fails on array<file>; ReDoc is read-only).
+# Served at /scalar, uses the same /openapi.json as /docs and /redoc.
+from fastapi.responses import HTMLResponse
+
+
+@app.get("/scalar", include_in_schema=False, response_class=HTMLResponse)
+async def scalar_docs() -> HTMLResponse:
+    return HTMLResponse(
+        """<!doctype html>
+<html>
+  <head>
+    <title>DocklyOCR — API Reference</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  </head>
+  <body>
+    <script id="api-reference" data-url="/openapi.json"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  </body>
+</html>"""
+    )
+
+
 async def _check_ollama() -> str:
     try:
         url = settings.ollama_url.rstrip("/")

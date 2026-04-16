@@ -33,6 +33,13 @@ class Settings(BaseSettings):
 
     sync_timeout_s: int = 300
 
+    # Scaleway on-demand GPU (optional). If all four are set, the worker
+    # will power on the GPU instance when a job arrives.
+    scw_access_key: str = ""
+    scw_secret_key: str = ""
+    scw_gpu_server_id: str = ""
+    scw_gpu_zone: str = "fr-par-2"
+
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024

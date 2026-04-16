@@ -361,6 +361,9 @@ def test_sync_ocr_all_formats(
 def _install_worker_subprocess_shim(monkeypatch: pytest.MonkeyPatch, db_engine) -> None:
     """Replace the worker's ``subprocess`` alias so the pipeline runs in-process.
 
+    Also stubs out ``ensure_gpu_running`` — tests use mocked Ollama calls
+    and never hit the real backend or the Scaleway API.
+
     The real worker shells out to ``python -m app.services.ocr_runner`` which
     would bypass our monkey-patched ``_call_ollama``. Instead we parse the
     CLI args the worker would have used, run ``run_ocr`` directly (which
@@ -374,6 +377,11 @@ def _install_worker_subprocess_shim(monkeypatch: pytest.MonkeyPatch, db_engine) 
     keep working. Any non-OCR-runner call on the shim is forwarded to the
     real ``subprocess.run`` as a safety net.
     """
+    # Stub out GPU auto-start — tests run without a real GPU backend
+    monkeypatch.setattr(
+        "app.workers.ocr_worker.ensure_gpu_running", lambda: None
+    )
+
     real_run = subprocess.run
 
     def _fake_run(cmd, check=True, timeout=None, **kwargs):  # noqa: ARG001

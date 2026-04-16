@@ -27,6 +27,7 @@ from app.config import settings
 from app.db import engine
 from app.models import Job, JobStatus
 from app.services.formatters import format_output
+from app.services.gpu_manager import ensure_gpu_running
 from app.services.ocr_pipeline import OcrResult
 from app.services.storage import storage
 from app.services.webhook import MAX_ATTEMPTS, RETRY_DELAYS_S, deliver_webhook, deliver_with_retry
@@ -58,6 +59,21 @@ async def process_ocr_job(ctx, job_id: str) -> str:
             session.add(job)
             session.commit()
             return "missing_input"
+
+        # On-demand GPU: boot via Scaleway API if the backend is offline.
+        # No-op if already running or Scaleway creds not configured.
+        try:
+            ensure_gpu_running()
+        except RuntimeError as e:
+            with Session(engine) as s2:
+                j2 = s2.get(Job, job_id)
+                if j2 is not None:
+                    j2.status = JobStatus.failed
+                    j2.error_message = f"GPU boot timeout: {e}"
+                    j2.finished_at = datetime.utcnow()
+                    s2.add(j2)
+                    s2.commit()
+            return "gpu_boot_timeout"
 
         try:
             with tempfile.TemporaryDirectory(prefix=f"ocr_{job_id}_") as tmp_dir_str:

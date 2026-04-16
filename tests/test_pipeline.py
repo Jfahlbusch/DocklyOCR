@@ -198,3 +198,247 @@ def test_ocr_result_from_json_dict_missing_is_table():
     }
     result = OcrResult.from_json_dict(data)
     assert result.pages[0].is_table is False
+
+
+def test_detect_table_patterns_positive():
+    from app.services.ocr_pipeline import _detect_table_patterns
+
+    text = "| Leistung | Betrag | SB |\n|----------|--------|----|\n| Haftpflicht | 5.000.000 EUR | 500 EUR |\n| Kasko | 50.000 EUR | 300 EUR |\n| Glasbruch | 10.000 EUR | 150 EUR |"
+    assert _detect_table_patterns(text) is True
+
+
+def test_detect_table_patterns_negative():
+    from app.services.ocr_pipeline import _detect_table_patterns
+
+    text = "Die Versicherung gilt für alle Sachschäden, die durch\nhöhere Gewalt verursacht werden. Der Versicherungsnehmer\nist verpflichtet, den Schaden innerhalb von 14 Tagen\nnach Bekanntwerden zu melden."
+    assert _detect_table_patterns(text) is False
+
+
+def test_detect_table_patterns_short_text():
+    from app.services.ocr_pipeline import _detect_table_patterns
+
+    assert _detect_table_patterns("| A | B |") is False
+    assert _detect_table_patterns("") is False
+
+
+def test_detect_table_patterns_number_columns():
+    from app.services.ocr_pipeline import _detect_table_patterns
+
+    text = "Posten          Betrag       Steuer\nGrundbeitrag    1.234,56     234\nZusatzbeitrag     567,89     107\nGesamtbeitrag   1.802,45     341"
+    assert _detect_table_patterns(text) is True
+
+
+def test_ocr_table_returns_markdown(monkeypatch, tmp_path):
+    from app.services.ocr_pipeline import _ocr_table
+
+    img_path = tmp_path / "test_table.jpg"
+    Image.new("RGB", (100, 100), "white").save(img_path, "JPEG")
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"response": "| A | B |\n|---|---|\n| 1 | 2 |"}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def post(self, url, **kw):
+            assert "Markdown table" in kw["json"]["prompt"]
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.ocr_pipeline.httpx.Client", FakeClient)
+    result = _ocr_table(img_path)
+    assert "| A | B |" in result
+
+
+needs_pdftoppm = pytest.mark.skipif(
+    shutil.which("pdftoppm") is None, reason="pdftoppm not installed"
+)
+
+
+@needs_pdftoppm
+def test_batch_extract_pages(tmp_path):
+    from PIL import Image
+
+    from app.services.ocr_pipeline import _batch_extract_pages
+
+    imgs = [Image.new("RGB", (200, 300), color) for color in ("white", "gray")]
+    pdf_path = tmp_path / "test.pdf"
+    imgs[0].save(pdf_path, "PDF", save_all=True, append_images=imgs[1:])
+    pages = _batch_extract_pages(pdf_path, tmp_path, dpi=150)
+    assert len(pages) == 2
+    assert all(p.suffix == ".jpg" for p in pages)
+    assert all(p.exists() for p in pages)
+    assert pages[0].name < pages[1].name
+
+
+def test_downscale_for_strategy(tmp_path):
+    from PIL import Image
+
+    from app.services.ocr_pipeline import _downscale_for_strategy
+
+    src = tmp_path / "page-001.jpg"
+    Image.new("RGB", (1500, 2000), "white").save(src, "JPEG")
+    scaled = _downscale_for_strategy(src, target_dpi=100, tmp_dir=tmp_path)
+    assert scaled.exists()
+    img = Image.open(scaled)
+    assert 990 <= img.width <= 1010
+    assert 1325 <= img.height <= 1340
+
+
+# ── Cross-page boundary merge tests ──────────────────────────────────
+
+
+def test_merge_across_boundaries_joins_broken_sentence():
+    from app.services.ocr_pipeline import _merge_across_boundaries
+
+    pages = [
+        PageResult(1, "Die Versicherung gilt für alle", "s", 1.0),
+        PageResult(2, "Sachschäden ab 500 EUR.", "s", 1.0),
+    ]
+    _merge_across_boundaries(pages)
+    assert pages[0].text == ""
+    assert pages[1].text == "Die Versicherung gilt für alle Sachschäden ab 500 EUR."
+
+
+def test_merge_across_boundaries_keeps_complete_sentences():
+    from app.services.ocr_pipeline import _merge_across_boundaries
+
+    pages = [
+        PageResult(1, "Erster Absatz endet hier.", "s", 1.0),
+        PageResult(2, "Zweiter Absatz beginnt.", "s", 1.0),
+    ]
+    _merge_across_boundaries(pages)
+    assert pages[0].text == "Erster Absatz endet hier."
+    assert pages[1].text == "Zweiter Absatz beginnt."
+
+
+def test_merge_across_boundaries_skips_section_start():
+    from app.services.ocr_pipeline import _merge_across_boundaries
+
+    pages = [
+        PageResult(1, "Ende des vorherigen Textes ohne Punkt", "s", 1.0),
+        PageResult(2, "§ 5 Ausschlüsse\nDie Versicherung...", "s", 1.0),
+    ]
+    _merge_across_boundaries(pages)
+    assert "ohne Punkt" in pages[0].text
+    assert pages[1].text.startswith("§ 5")
+
+
+def test_merge_across_boundaries_skips_table_pages():
+    from app.services.ocr_pipeline import _merge_across_boundaries
+
+    pages = [
+        PageResult(1, "Text endet ohne Punkt", "s", 1.0),
+        PageResult(2, "| A | B |", "s", 1.0, is_table=True),
+    ]
+    _merge_across_boundaries(pages)
+    assert pages[0].text == "Text endet ohne Punkt"
+    assert pages[1].text == "| A | B |"
+
+
+def test_merge_across_boundaries_skips_none():
+    from app.services.ocr_pipeline import _merge_across_boundaries
+
+    pages = [
+        PageResult(1, "Text ohne Punkt", "s", 1.0),
+        PageResult(2, None, "ALLE_FEHLGESCHLAGEN", 0.0),
+        PageResult(3, "Neuer Absatz.", "s", 1.0),
+    ]
+    _merge_across_boundaries(pages)
+    assert pages[0].text == "Text ohne Punkt"
+    assert pages[1].text is None
+    assert pages[2].text == "Neuer Absatz."
+
+
+def test_merge_three_pages_chain():
+    from app.services.ocr_pipeline import _merge_across_boundaries
+
+    pages = [
+        PageResult(1, "Absatz eins beginnt und", "s", 1.0),
+        PageResult(2, "geht weiter bis", "s", 1.0),
+        PageResult(3, "zum Ende dieses Satzes.", "s", 1.0),
+    ]
+    _merge_across_boundaries(pages)
+    assert "zum Ende dieses Satzes." in pages[2].text
+
+
+def test_incremental_writer_md(tmp_path):
+    from app.services.ocr_pipeline import IncrementalWriter
+
+    out = tmp_path / "result.md"
+    writer = IncrementalWriter(out, "md")
+    writer.append_chunk(
+        [
+            PageResult(1, "Erster Absatz.", "150dpi/1024px", 2.0),
+            PageResult(2, "| A | B |", "150dpi/1024px", 1.0, is_table=True),
+        ]
+    )
+    writer.append_chunk(
+        [
+            PageResult(3, "Dritter Absatz.", "100dpi/768px", 3.0),
+        ]
+    )
+    content = out.read_text(encoding="utf-8")
+    assert "## Seite 1" in content
+    assert "## Seite 2" in content
+    assert "## Seite 3" in content
+    assert "Erster Absatz." in content
+    assert "| A | B |" in content
+    assert content.count("> OCR-Strategie:") == 2  # pages 1 and 3
+    assert "`150dpi/1024px`" in content
+    assert "`100dpi/768px`" in content
+
+
+def test_incremental_writer_txt(tmp_path):
+    from app.services.ocr_pipeline import IncrementalWriter
+
+    out = tmp_path / "result.txt"
+    writer = IncrementalWriter(out, "txt")
+    writer.append_chunk(
+        [
+            PageResult(1, "Page one.", "s", 1.0),
+            PageResult(2, "Page two.", "s", 1.0),
+        ]
+    )
+    content = out.read_text(encoding="utf-8")
+    assert "Page one." in content
+    assert "Page two." in content
+
+
+def test_incremental_writer_json_deferred(tmp_path):
+    from app.services.ocr_pipeline import IncrementalWriter
+
+    out = tmp_path / "result.json"
+    writer = IncrementalWriter(out, "json")
+    writer.append_chunk([PageResult(1, "text", "s", 1.0)])
+    assert out.read_text() == ""
+    result = OcrResult(
+        pages=[PageResult(1, "text", "s", 1.0)],
+        page_count=1,
+        pages_ok=1,
+        pages_failed=0,
+    )
+    body = writer.finalize(result)
+    assert b'"page_count": 1' in body
+
+
+def test_incremental_writer_failed_page_md(tmp_path):
+    from app.services.ocr_pipeline import IncrementalWriter
+
+    out = tmp_path / "result.md"
+    writer = IncrementalWriter(out, "md")
+    writer.append_chunk([PageResult(1, None, "ALLE_FEHLGESCHLAGEN", 0.0)])
+    content = out.read_text(encoding="utf-8")
+    assert "[OCR-Fehler auf Seite 1]" in content

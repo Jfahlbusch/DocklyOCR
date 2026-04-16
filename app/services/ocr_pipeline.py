@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import glob
+import re
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -102,7 +103,67 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 PDF_SUFFIXES = {".pdf"}
 
 
+def _batch_extract_pages(pdf_path: Path, tmp_dir: Path, dpi: int = 150) -> list[Path]:
+    """Extract ALL pages at once via pdftoppm. Returns sorted list of JPEG paths."""
+    prefix = tmp_dir / "page"
+    subprocess.run(
+        ["pdftoppm", "-r", str(dpi), "-jpeg", str(pdf_path), str(prefix)],
+        capture_output=True,
+        timeout=120,
+        check=True,
+    )
+    return sorted(tmp_dir.glob("page-*.jpg"))
+
+
+def _downscale_for_strategy(src_150dpi: Path, target_dpi: int, tmp_dir: Path) -> Path:
+    """Proportional downscale from 150dpi source to target_dpi."""
+    scale = target_dpi / 150
+    img = Image.open(src_150dpi)
+    new_size = (int(img.width * scale), int(img.height * scale))
+    img = img.resize(new_size, Image.LANCZOS)
+    out = tmp_dir / f"scaled_{target_dpi}dpi_{src_150dpi.name}"
+    img.save(out, "JPEG", quality=90)
+    return out
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
+
+TABLE_INDICATORS: list[str] = [
+    r"\|.*\|.*\|",  # at least 3 pipe-delimited columns
+    r"\d+[.,]\d{2}\s+\d+",  # numeric columns (e.g. 1.234,56  234)
+    r"[-–]{3,}\s*\+",  # horizontal rules with crosses
+]
+
+
+def _detect_table_patterns(text: str) -> bool:
+    """Heuristic: True if >= 30% of lines match table indicators."""
+    lines = text.strip().splitlines()
+    if len(lines) < 3:
+        return False
+    matches = sum(1 for line in lines if any(re.search(pat, line) for pat in TABLE_INDICATORS))
+    return matches / len(lines) >= 0.3
+
+
+def _ocr_table(img_path: Path) -> str:
+    """Re-OCR with table-specific prompt. Returns Markdown table text."""
+    with open(img_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    with httpx.Client(timeout=settings.ollama_request_timeout_s) as client:
+        r = client.post(
+            f"{settings.ollama_url.rstrip('/')}/api/generate",
+            json={
+                "model": settings.ollama_model,
+                "prompt": (
+                    "Extract all tables from this image as Markdown tables "
+                    "using | delimiters. Keep headers. Output ONLY the table, "
+                    "no explanation."
+                ),
+                "images": [b64],
+                "stream": False,
+            },
+        )
+        r.raise_for_status()
+        return r.json().get("response", "").strip()
 
 
 def _call_ollama(img_path: Path) -> str:
@@ -342,6 +403,49 @@ def _ocr_pdf_page(pdf_path: Path, page_num: int, tmp_dir: Path) -> PageResult:
     return PageResult(number=page_num, text=None, strategy="ALLE_FEHLGESCHLAGEN", elapsed_s=0.0)
 
 
+# ── Incremental writer ────────────────────────────────────────────────
+
+
+class IncrementalWriter:
+    """Appends formatted page chunks to an output file during processing."""
+
+    def __init__(self, output_path: Path, fmt: str) -> None:
+        self.output_path = output_path
+        self.fmt = fmt
+        self.output_path.write_bytes(b"")  # truncate / create
+
+    def append_chunk(self, pages: list[PageResult]) -> None:
+        """Format and append a chunk of pages. No-op for json/toon."""
+        if self.fmt not in ("md", "txt"):
+            return
+        with open(self.output_path, "a", encoding="utf-8") as f:
+            for page in pages:
+                if page.text is None:
+                    if self.fmt == "md":
+                        f.write(f"## Seite {page.number}\n\n")
+                        f.write(f"[OCR-Fehler auf Seite {page.number}]\n\n")
+                    elif self.fmt == "txt":
+                        f.write(f"[OCR-Fehler Seite {page.number}]\f")
+                    continue
+                if self.fmt == "md":
+                    f.write(f"## Seite {page.number}\n\n")
+                    f.write(page.text + "\n\n")
+                    if not page.is_table:
+                        f.write(f"> OCR-Strategie: `{page.strategy}`\n\n")
+                elif self.fmt == "txt":
+                    f.write(page.text + "\f")
+
+    def finalize(self, result: OcrResult) -> bytes:
+        """For json/toon: write the full document now. Returns final bytes."""
+        if self.fmt in ("md", "txt"):
+            return self.output_path.read_bytes()
+        from app.services.formatters import format_output
+
+        body, _ = format_output(result, self.fmt)
+        self.output_path.write_bytes(body)
+        return body
+
+
 # ── Public entry point ────────────────────────────────────────────────
 
 
@@ -386,3 +490,44 @@ def run_ocr(input_path: Path, tmp_dir: Path) -> OcrResult:
         pages_ok=pages_ok,
         pages_failed=pages_failed,
     )
+
+
+# ── Cross-page boundary helpers ───────────────────────────────────────
+
+
+def _ends_sentence(line: str) -> bool:
+    """True if line ends with terminal punctuation."""
+    return bool(line) and line[-1] in '.!?:;»"'
+
+
+def _starts_new_section(line: str) -> bool:
+    """True if line starts a new logical section (§, heading, list marker)."""
+    return bool(re.match(r"^(§\s*\d|[A-Z]{2,}|\d+\.\s|[-–•])\s", line))
+
+
+def _merge_across_boundaries(pages: list[PageResult]) -> list[PageResult]:
+    """Fix sentence breaks across page boundaries. Modifies pages in-place."""
+    if len(pages) < 2:
+        return pages
+    for i in range(len(pages) - 1):
+        curr = pages[i]
+        nxt = pages[i + 1]
+        if curr.text is None or nxt.text is None:
+            continue
+        if curr.is_table or nxt.is_table:
+            continue
+        last_line = curr.text.rstrip().rsplit("\n", 1)[-1].rstrip()
+        first_line = nxt.text.lstrip().split("\n", 1)[0].lstrip()
+        if not _ends_sentence(last_line) and not _starts_new_section(first_line):
+            curr_parts = curr.text.rstrip().rsplit("\n", 1)
+            nxt_parts = nxt.text.lstrip().split("\n", 1)
+            if len(curr_parts) == 2:
+                curr.text = curr_parts[0]
+            else:
+                curr.text = ""
+            joined = last_line + " " + first_line
+            if len(nxt_parts) == 2:
+                nxt.text = joined + "\n" + nxt_parts[1]
+            else:
+                nxt.text = joined
+    return pages

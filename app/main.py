@@ -98,8 +98,11 @@ app.include_router(admin.router)
 
 async def _check_ollama() -> str:
     try:
+        url = settings.ollama_url.rstrip("/")
+        # Auto-detect backend: vLLM → /v1/models, Ollama → /api/tags
+        path = "/v1/models" if settings.ollama_use_openai_api else "/api/tags"
         async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"{settings.ollama_url.rstrip('/')}/api/tags")
+            r = await client.get(f"{url}{path}")
             if r.status_code == 200:
                 return "ok"
             return f"status_{r.status_code}"

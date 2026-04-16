@@ -165,36 +165,76 @@ def _html_table_to_markdown(html: str) -> str:
 
 def _ocr_table(img_path: Path) -> str:
     """Re-OCR with table-specific prompt. Returns Markdown table text."""
-    with open(img_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
-    with httpx.Client(timeout=settings.ollama_request_timeout_s) as client:
-        r = client.post(
-            f"{settings.ollama_url.rstrip('/')}/api/generate",
-            json={
-                "model": settings.ollama_model,
-                "prompt": (
-                    "Extract all tables from this image as Markdown tables "
-                    "using | delimiters. Keep headers. Output ONLY the table, "
-                    "no explanation."
-                ),
-                "images": [b64],
-                "stream": False,
-            },
-        )
-        r.raise_for_status()
-        return r.json().get("response", "").strip()
+    return _call_vision_backend(img_path, _TABLE_PROMPT).strip()
+
+
+_OCR_PROMPT = (
+    "Transcribe all text from this image exactly as it appears. "
+    "Preserve line breaks, paragraph structure and section numbering. "
+    "Do not describe the image or add commentary. "
+    "Output only the verbatim text."
+)
+
+_TABLE_PROMPT = (
+    "Extract all tables from this image as Markdown tables using "
+    "| delimiters. Include headers. For any text that is not a table, "
+    "transcribe it verbatim preserving line breaks. Do not describe the image."
+)
 
 
 def _call_ollama(img_path: Path) -> str:
-    """Send image to glm-ocr, return text or raise on error."""
+    """Send image to the configured OCR backend. Returns transcribed text.
+
+    The setting ``OLLAMA_URL`` drives the backend:
+    - ``http://host:11434`` → Ollama (``/api/generate`` with ``prompt: 'OCR'``)
+    - ``http://host:8000``  → vLLM (OpenAI ``/v1/chat/completions``)
+
+    The function auto-detects based on the URL path.
+    """
+    return _call_vision_backend(img_path, _OCR_PROMPT)
+
+
+def _call_vision_backend(img_path: Path, prompt: str) -> str:
     with open(img_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
-    with httpx.Client(timeout=settings.ollama_request_timeout_s) as client:
+
+    url = settings.ollama_url.rstrip("/")
+    timeout = settings.ollama_request_timeout_s
+
+    # vLLM / OpenAI-compatible API (port 8000, /v1/chat/completions)
+    if settings.ollama_use_openai_api:
+        with httpx.Client(timeout=timeout) as client:
+            r = client.post(
+                f"{url}/v1/chat/completions",
+                json={
+                    "model": settings.ollama_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                                },
+                                {"type": "text", "text": prompt},
+                            ],
+                        }
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0.0,
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            return data["choices"][0]["message"]["content"]
+
+    # Ollama native API
+    with httpx.Client(timeout=timeout) as client:
         r = client.post(
-            f"{settings.ollama_url.rstrip('/')}/api/generate",
+            f"{url}/api/generate",
             json={
                 "model": settings.ollama_model,
-                "prompt": "OCR",
+                "prompt": "OCR" if prompt == _OCR_PROMPT else prompt,
                 "images": [b64],
                 "stream": False,
             },
@@ -578,7 +618,7 @@ def _is_pdf(path: Path) -> bool:
     return path.suffix.lower() == ".pdf"
 
 
-MAX_PARALLEL_PAGES: int = 4  # concurrent pages sent to Ollama (proven quality)
+MAX_PARALLEL_PAGES: int = 12  # vLLM on H100 handles high concurrency cleanly
 
 
 def _process_single_page(img_path: Path, page_num: int, tmp_dir: Path) -> PageResult:

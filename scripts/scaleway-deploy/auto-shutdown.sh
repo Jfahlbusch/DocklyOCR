@@ -12,7 +12,7 @@ set -euo pipefail
 source /etc/dockly/scw-credentials
 
 IDLE_FILE="/tmp/dockly-last-activity"
-IDLE_THRESHOLD_SECONDS=120
+IDLE_THRESHOLD_SECONDS=30  # shut down fast — H100 is expensive
 
 # Check if Ollama has a model loaded (= recent/current inference)
 MODEL_LOADED=$(curl -sf http://localhost:11434/api/ps 2>/dev/null \

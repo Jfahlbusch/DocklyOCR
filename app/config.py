@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     ollama_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "glm-ocr"
     ollama_request_timeout_s: int = 120
+    # True = vLLM (OpenAI /v1/chat/completions), False = Ollama /api/generate
+    ollama_use_openai_api: bool = False
 
     admin_username: str = "admin"
     admin_password_hash: str = ""

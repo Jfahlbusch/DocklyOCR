@@ -422,14 +422,21 @@ def _detect_columns(img_path: Path) -> bool:
             if diff > best_diff:
                 best_diff = diff
 
-        # Threshold 15: separates single-column (~3) from multi-column (~25+)
-        return best_diff > 15
+        # Threshold 25: only trigger on clear multi-column layouts. Raised from
+        # 15 to reduce false positives (wide-margin pages). Missed multi-column
+        # pages still get caught by column-split fallback after normal strategies.
+        return best_diff > 25
     except Exception:
         return False
 
 
 def _try_column_split_ocr(src_image: Path, tmp_dir: Path, page_num: int) -> PageResult | None:
-    """Try left/right column split OCR. Returns PageResult on success, None on failure."""
+    """Try left/right column split OCR. Left+right halves OCR'd in PARALLEL.
+
+    Returns PageResult on success, None on failure.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
     try:
         work_path = tmp_dir / f"pg{page_num}.jpg"
         img = Image.open(src_image).convert("RGB")
@@ -437,8 +444,11 @@ def _try_column_split_ocr(src_image: Path, tmp_dir: Path, page_num: int) -> Page
         left_path, right_path = split_page_columns(work_path, tmp_dir, page_num)
         work_path.unlink(missing_ok=True)
 
-        left_text, left_ok, _ = try_ocr(left_path)
-        right_text, right_ok, _ = try_ocr(right_path)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            left_future = executor.submit(try_ocr, left_path)
+            right_future = executor.submit(try_ocr, right_path)
+            left_text, left_ok, _ = left_future.result()
+            right_text, right_ok, _ = right_future.result()
 
         for f in [left_path, right_path]:
             with contextlib.suppress(OSError):
@@ -569,7 +579,7 @@ def _is_pdf(path: Path) -> bool:
     return path.suffix.lower() == ".pdf"
 
 
-MAX_PARALLEL_PAGES: int = 4  # concurrent pages sent to Ollama (matches OLLAMA_NUM_PARALLEL)
+MAX_PARALLEL_PAGES: int = 6  # concurrent pages sent to Ollama
 
 
 def _process_single_page(img_path: Path, page_num: int, tmp_dir: Path) -> PageResult:

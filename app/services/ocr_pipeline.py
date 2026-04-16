@@ -39,6 +39,7 @@ class PageResult:
     text: str | None  # None when all strategies failed
     strategy: str  # strategy name, or "ALLE_FEHLGESCHLAGEN"
     elapsed_s: float
+    is_table: bool = False
 
 
 @dataclass
@@ -60,7 +61,16 @@ class OcrResult:
 
     @classmethod
     def from_json_dict(cls, data: dict) -> OcrResult:
-        pages = [PageResult(**p) for p in data["pages"]]
+        pages = [
+            PageResult(
+                number=p["number"],
+                text=p["text"],
+                strategy=p["strategy"],
+                elapsed_s=p["elapsed_s"],
+                is_table=p.get("is_table", False),
+            )
+            for p in data["pages"]
+        ]
         return cls(
             pages=pages,
             page_count=data["page_count"],

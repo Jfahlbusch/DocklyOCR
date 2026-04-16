@@ -163,3 +163,38 @@ def test_run_ocr_unsupported_extension(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unsupported input type"):
         run_ocr(bad, tmp_dir)
+
+
+def test_page_result_is_table_default():
+    pr = PageResult(number=1, text="hello", strategy="150dpi/1024px", elapsed_s=1.0)
+    assert pr.is_table is False
+
+
+def test_page_result_is_table_explicit():
+    pr = PageResult(
+        number=1, text="|A|B|\n|1|2|", strategy="150dpi/1024px", elapsed_s=1.0, is_table=True
+    )
+    assert pr.is_table is True
+
+
+def test_ocr_result_roundtrip_with_is_table():
+    pages = [
+        PageResult(1, "normal text", "150dpi/1024px", 2.0, is_table=False),
+        PageResult(2, "|A|B|\n|1|2|", "150dpi/1024px", 3.0, is_table=True),
+    ]
+    result = OcrResult(pages=pages, page_count=2, pages_ok=2, pages_failed=0)
+    data = result.to_json_dict()
+    restored = OcrResult.from_json_dict(data)
+    assert restored.pages[0].is_table is False
+    assert restored.pages[1].is_table is True
+
+
+def test_ocr_result_from_json_dict_missing_is_table():
+    data = {
+        "page_count": 1,
+        "pages_ok": 1,
+        "pages_failed": 0,
+        "pages": [{"number": 1, "text": "hello", "strategy": "s", "elapsed_s": 1.0}],
+    }
+    result = OcrResult.from_json_dict(data)
+    assert result.pages[0].is_table is False

@@ -157,6 +157,15 @@ async def process_ocr_job(ctx, job_id: str) -> str:
         if not success:
             await _schedule_webhook_retry(ctx, job_id)
 
+    # Proactive GPU shutdown when queue is empty.
+    # Small delay: let ARQ finish its own Redis bookkeeping for this job
+    # before we check zcard (would otherwise see phantom markers).
+    import asyncio
+
+    await asyncio.sleep(3)
+    with contextlib.suppress(Exception):
+        await shutdown_gpu_if_idle(ctx.get("redis"))
+
     return "done"
 
 
@@ -182,16 +191,6 @@ async def _schedule_webhook_retry(ctx, job_id: str) -> None:
     )
 
 
-async def on_job_end(ctx):
-    """ARQ lifecycle hook — fires after ctx/redis state is cleaned up.
-
-    Called once per job completion. Checks the queue depth and stops
-    the GPU via Scaleway API if nothing else is waiting.
-    """
-    with contextlib.suppress(Exception):
-        await shutdown_gpu_if_idle(ctx.get("redis"))
-
-
 class WorkerSettings:
     """ARQ worker configuration.
 
@@ -204,7 +203,6 @@ class WorkerSettings:
     functions = [process_ocr_job, deliver_with_retry]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 1
-    on_job_end = on_job_end
     # Slightly above the subprocess pipeline timeout so the TimeoutExpired
     # branch above runs cleanly before ARQ gives up.
     job_timeout = _PIPELINE_TIMEOUT_S + 300

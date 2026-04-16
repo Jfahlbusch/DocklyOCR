@@ -1,4 +1,4 @@
-"""DocklyOCR Pipeline v4 — port of Anhang C reference code.
+"""DocklyOCR Pipeline v5 — port of Anhang C reference code.
 
 This module provides the canonical OCR pipeline used by DocklyOCR. It is
 intentionally a 1:1 port of the bewährte v4 multi-strategy pipeline from the
@@ -383,6 +383,7 @@ def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) ->
 
 
 def _ocr_pdf_page(pdf_path: Path, page_num: int, tmp_dir: Path) -> PageResult:
+    # v4 legacy — retained for direct use and existing tests
     """Try all strategies for a PDF page until one succeeds."""
     for name, dpi, max_px, gray, quality, split in STRATEGIES:
         # 1) Extract page image at the strategy's DPI
@@ -449,47 +450,93 @@ class IncrementalWriter:
 # ── Public entry point ────────────────────────────────────────────────
 
 
-def run_ocr(input_path: Path, tmp_dir: Path) -> OcrResult:
-    """Run the 13-strategy OCR pipeline on a PDF or image input.
+def _is_pdf(path: Path) -> bool:
+    return path.suffix.lower() == ".pdf"
 
-    Args:
-        input_path: Path to PDF (`.pdf`) or image (`.jpg/.jpeg/.png/.tif/.tiff`).
-        tmp_dir: Working directory for intermediate files. Must already exist
-            (caller's responsibility); this function only writes inside it and
-            cleans up its own ``pgN*`` files between strategies.
 
-    Returns:
-        ``OcrResult`` with one ``PageResult`` per page. Failed pages have
-        ``text=None`` and ``strategy="ALLE_FEHLGESCHLAGEN"`` — no exception
-        is raised; the caller decides how to render failures.
+def run_ocr(
+    input_path: Path,
+    tmp_dir: Path,
+    output_path: Path | None = None,
+    output_format: str = "md",
+) -> OcrResult:
+    """Public entry point for the OCR pipeline (v5).
+
+    If *output_path* is provided, results are written incrementally
+    for ``md`` and ``txt`` formats.  ``json`` and ``toon`` are written
+    in full at the end via :meth:`IncrementalWriter.finalize`.
     """
     input_path = Path(input_path)
     tmp_dir = Path(tmp_dir)
     suffix = input_path.suffix.lower()
 
-    pages: list[PageResult] = []
-
-    if suffix in PDF_SUFFIXES:
-        page_count = get_page_count(input_path)
-        for pg in range(1, page_count + 1):
-            pages.append(_ocr_pdf_page(input_path, pg, tmp_dir))
-    elif suffix in IMAGE_SUFFIXES:
-        pages.append(_ocr_image_with_strategies(input_path, tmp_dir, page_num=1))
-    else:
+    if suffix not in PDF_SUFFIXES and suffix not in IMAGE_SUFFIXES:
         raise ValueError(
             f"Unsupported input type: {suffix!r} (expected PDF or one of {sorted(IMAGE_SUFFIXES)})"
         )
 
-    page_count = len(pages)
-    pages_ok = sum(1 for p in pages if p.text is not None and p.text.strip() != "")
-    pages_failed = page_count - pages_ok
+    # 1. Extract pages
+    page_images = _batch_extract_pages(input_path, tmp_dir) if _is_pdf(input_path) else [input_path]
 
-    return OcrResult(
-        pages=pages,
-        page_count=page_count,
+    if not page_images:
+        return OcrResult(pages=[], page_count=0, pages_ok=0, pages_failed=0)
+
+    # 2. Writer (optional)
+    writer = IncrementalWriter(output_path, output_format) if output_path else None
+
+    # 3. OCR + table detection per page
+    all_pages: list[PageResult] = []
+    for i, img_path in enumerate(page_images):
+        page_num = i + 1
+        page_result = _ocr_image_with_strategies(img_path, tmp_dir, page_num)
+
+        # Two-pass table detection
+        if page_result.text and _detect_table_patterns(page_result.text):
+            try:
+                table_text = _ocr_table(img_path)
+                if table_text.strip():
+                    page_result.text = table_text
+                    page_result.is_table = True
+            except Exception:
+                pass  # keep original text on table-OCR failure
+
+        all_pages.append(page_result)
+
+        # 4. Every 3 pages: merge + write
+        if len(all_pages) >= 3 and len(all_pages) % 3 == 0:
+            chunk = all_pages[-3:]
+            _merge_across_boundaries(chunk)
+            if writer:
+                write_start = 0 if len(all_pages) == 3 else 1
+                writer.append_chunk(chunk[write_start:])
+
+    # 5. Remainder (last incomplete chunk)
+    remainder = len(all_pages) % 3
+    if remainder > 0:
+        if len(all_pages) > remainder:
+            chunk = [all_pages[-(remainder + 1)]] + all_pages[-remainder:]
+            _merge_across_boundaries(chunk)
+            if writer:
+                writer.append_chunk(chunk[1:])
+        else:
+            _merge_across_boundaries(all_pages)
+            if writer:
+                writer.append_chunk(all_pages)
+
+    # 6. Build result
+    pages_ok = sum(1 for p in all_pages if p.text)
+    ocr_result = OcrResult(
+        pages=all_pages,
+        page_count=len(all_pages),
         pages_ok=pages_ok,
-        pages_failed=pages_failed,
+        pages_failed=len(all_pages) - pages_ok,
     )
+
+    # 7. Finalize (json/toon written here)
+    if writer:
+        writer.finalize(ocr_result)
+
+    return ocr_result
 
 
 # ── Cross-page boundary helpers ───────────────────────────────────────

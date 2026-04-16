@@ -442,3 +442,85 @@ def test_incremental_writer_failed_page_md(tmp_path):
     writer.append_chunk([PageResult(1, None, "ALLE_FEHLGESCHLAGEN", 0.0)])
     content = out.read_text(encoding="utf-8")
     assert "[OCR-Fehler auf Seite 1]" in content
+
+
+# ── v5 run_ocr integration tests ────────────────────────────────────
+
+
+def test_run_ocr_with_output_path_writes_incrementally(tmp_path, monkeypatch):
+    from app.services.ocr_pipeline import run_ocr
+
+    call_count = {"n": 0}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):  # noqa: ARG002
+            call_count["n"] += 1
+            return {"response": f"Page {call_count['n']} text."}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def post(self, url, **kw):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.ocr_pipeline.httpx.Client", FakeClient)
+
+    img_path = tmp_path / "input.jpg"
+    Image.new("RGB", (200, 300), "white").save(img_path, "JPEG")
+
+    output_path = tmp_path / "result.md"
+    result = run_ocr(img_path, tmp_path, output_path=output_path, output_format="md")
+
+    assert result.page_count == 1
+    assert result.pages_ok == 1
+    assert output_path.exists()
+    content = output_path.read_text()
+    assert "## Seite 1" in content
+
+
+def test_run_ocr_without_output_path_backward_compat(tmp_path, monkeypatch):
+    from app.services.ocr_pipeline import run_ocr
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"response": "Some text."}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def post(self, url, **kw):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.ocr_pipeline.httpx.Client", FakeClient)
+
+    img_path = tmp_path / "input.jpg"
+    Image.new("RGB", (200, 300), "white").save(img_path, "JPEG")
+
+    result = run_ocr(img_path, tmp_path)
+    assert result.page_count == 1
+    assert result.pages_ok == 1
+    assert result.pages[0].text == "Some text."

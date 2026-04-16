@@ -40,9 +40,7 @@ def _format_md(result: OcrResult) -> bytes:
             if not page.is_table:
                 lines.append(f"> OCR-Strategie: `{page.strategy}`")
         else:
-            lines.append(
-                f"[OCR-Fehler auf Seite {page.number} — alle 13 Strategien fehlgeschlagen]"
-            )
+            lines.append(f"[OCR-Fehler auf Seite {page.number} — alle Strategien fehlgeschlagen]")
         lines.append("")
     return "\n".join(lines).encode("utf-8")
 

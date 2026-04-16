@@ -144,6 +144,25 @@ def _detect_table_patterns(text: str) -> bool:
     return matches / len(lines) >= 0.3
 
 
+def _html_table_to_markdown(html: str) -> str:
+    """Convert an HTML table to Markdown table format."""
+    if "<table" not in html.lower() and "<tr" not in html.lower():
+        return html
+    lines: list[str] = []
+    # Extract rows
+    row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
+    cell_pattern = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.DOTALL | re.IGNORECASE)
+    rows = row_pattern.findall(html)
+    for i, row_html in enumerate(rows):
+        cells = cell_pattern.findall(row_html)
+        # Strip nested HTML tags from cell content
+        clean_cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+        lines.append("| " + " | ".join(clean_cells) + " |")
+        if i == 0:
+            lines.append("| " + " | ".join("---" for _ in clean_cells) + " |")
+    return "\n".join(lines) if lines else html
+
+
 def _ocr_table(img_path: Path) -> str:
     """Re-OCR with table-specific prompt. Returns Markdown table text."""
     with open(img_path, "rb") as f:
@@ -257,6 +276,20 @@ def split_page_halves(src_path: Path, tmp_dir: Path, page_num: int) -> tuple[Pat
     top.save(top_path, "JPEG", quality=80)
     bot.save(bot_path, "JPEG", quality=80)
     return top_path, bot_path
+
+
+def split_page_columns(src_path: Path, tmp_dir: Path, page_num: int) -> tuple[Path, Path]:
+    """Split image into left and right halves (for multi-column layouts)."""
+    img = Image.open(src_path)
+    w, h = img.size
+    mid = w // 2
+    left = img.crop((0, 0, mid, h))
+    right = img.crop((mid, 0, w, h))
+    left_path = tmp_dir / f"pg{page_num}_left.jpg"
+    right_path = tmp_dir / f"pg{page_num}_right.jpg"
+    left.save(left_path, "JPEG", quality=80)
+    right.save(right_path, "JPEG", quality=80)
+    return left_path, right_path
 
 
 def try_ocr(img_path: Path, label: str = "") -> tuple[str, bool, float]:
@@ -383,6 +416,34 @@ def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) ->
         if text is not None:
             return PageResult(number=page_num, text=text, strategy=name, elapsed_s=elapsed)
 
+    # Last resort: try left/right column split (for multi-column layouts)
+    try:
+        work_path = tmp_dir / f"pg{page_num}.jpg"
+        img = Image.open(src_image).convert("RGB")
+        img.save(work_path, "JPEG", quality=95)
+        _resize_image_inplace(work_path, 1024)
+        left_path, right_path = split_page_columns(work_path, tmp_dir, page_num)
+        _cleanup_page_tmpfiles(tmp_dir, page_num)
+
+        left_text, left_ok, _ = try_ocr(left_path)
+        right_text, right_ok, _ = try_ocr(right_path)
+
+        for f in [left_path, right_path]:
+            with contextlib.suppress(OSError):
+                f.unlink()
+
+        if left_ok or right_ok:
+            combined = ""
+            if left_ok:
+                combined += left_text
+            if right_ok:
+                combined += "\n\n" + right_text
+            return PageResult(
+                number=page_num, text=combined.strip(), strategy="column-split", elapsed_s=0.0
+            )
+    except Exception:
+        _cleanup_page_tmpfiles(tmp_dir, page_num)
+
     return PageResult(number=page_num, text=None, strategy="ALLE_FEHLGESCHLAGEN", elapsed_s=0.0)
 
 
@@ -508,6 +569,8 @@ def run_ocr(
             try:
                 table_text = _ocr_table(img_path)
                 if table_text.strip():
+                    # Convert HTML tables to Markdown if needed
+                    table_text = _html_table_to_markdown(table_text)
                     page_result.text = table_text
                     page_result.is_table = True
             except Exception:

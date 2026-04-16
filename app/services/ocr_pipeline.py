@@ -389,16 +389,89 @@ def _ocr_single_strategy(
 MAX_STRATEGIES: int = 5  # Only try the first N strategies (rest rarely help, burn timeout)
 
 
+def _detect_columns(img_path: Path) -> bool:
+    """Detect multi-column layout via sliding-window search for a vertical gutter.
+
+    Scans the center 40% of the page (30%-70% width) for a narrow vertical
+    strip (~10px) that is significantly brighter than its 50px surroundings —
+    indicating a column gutter between text columns.
+    """
+    try:
+        import numpy as np
+
+        img = Image.open(img_path).convert("L")
+        w, h = img.size
+        if w < 200 or h < 200:
+            return False
+
+        # Sample band from 25%-75% of page height (skip header/footer)
+        band = img.crop((0, int(h * 0.25), w, int(h * 0.75)))
+        col_means = np.array(band, dtype=np.float32).mean(axis=0)
+
+        # Search in center 40% of width for a bright gap
+        search_start = int(w * 0.30)
+        search_end = int(w * 0.70)
+        zone = col_means[search_start:search_end]
+
+        best_diff = 0.0
+        for x in range(25, len(zone) - 25):
+            strip = zone[x - 5 : x + 5].mean()
+            left_ctx = zone[max(0, x - 50) : x - 10].mean()
+            right_ctx = zone[x + 10 : min(len(zone), x + 50)].mean()
+            diff = strip - (left_ctx + right_ctx) / 2
+            if diff > best_diff:
+                best_diff = diff
+
+        # Threshold 15: separates single-column (~3) from multi-column (~25+)
+        return best_diff > 15
+    except Exception:
+        return False
+
+
+def _try_column_split_ocr(src_image: Path, tmp_dir: Path, page_num: int) -> PageResult | None:
+    """Try left/right column split OCR. Returns PageResult on success, None on failure."""
+    try:
+        work_path = tmp_dir / f"pg{page_num}.jpg"
+        img = Image.open(src_image).convert("RGB")
+        img.save(work_path, "JPEG", quality=95)
+        left_path, right_path = split_page_columns(work_path, tmp_dir, page_num)
+        work_path.unlink(missing_ok=True)
+
+        left_text, left_ok, _ = try_ocr(left_path)
+        right_text, right_ok, _ = try_ocr(right_path)
+
+        for f in [left_path, right_path]:
+            with contextlib.suppress(OSError):
+                f.unlink()
+
+        if left_ok or right_ok:
+            combined = ""
+            if left_ok:
+                combined += left_text
+            if right_ok:
+                combined += "\n\n" + right_text
+            return PageResult(
+                number=page_num, text=combined.strip(), strategy="column-split", elapsed_s=0.0
+            )
+    except Exception:
+        _cleanup_page_tmpfiles(tmp_dir, page_num)
+    return None
+
+
 def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) -> PageResult:
     """Run strategies against a *single* image input (no PDF extraction).
 
-    Tries at most ``MAX_STRATEGIES`` (default 5) before giving up.
-    Used when the input is already an image (jpg/png/tiff). Each strategy gets
-    a fresh working copy of the source image so that the in-place resize never
-    modifies the caller's file.
+    If the image looks like a multi-column layout, tries column-split FIRST
+    (shortcut). Otherwise runs at most ``MAX_STRATEGIES`` normal strategies,
+    then falls back to column-split as last resort.
     """
+    # Shortcut: detect multi-column layout and try column-split FIRST
+    if _detect_columns(src_image):
+        result = _try_column_split_ocr(src_image, tmp_dir, page_num)
+        if result is not None:
+            return result
+
     for name, _dpi, max_px, gray, quality, split in STRATEGIES[:MAX_STRATEGIES]:
-        # Always operate on a fresh copy — never mutate the caller's source.
         work_path = tmp_dir / f"pg{page_num}.jpg"
         try:
             img = Image.open(src_image).convert("RGB")
@@ -416,34 +489,10 @@ def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) ->
         if text is not None:
             return PageResult(number=page_num, text=text, strategy=name, elapsed_s=elapsed)
 
-    # Last resort: try left/right column split (for multi-column layouts)
-    try:
-        work_path = tmp_dir / f"pg{page_num}.jpg"
-        img = Image.open(src_image).convert("RGB")
-        img.save(work_path, "JPEG", quality=95)
-        # No resize before column split — halves need full width for OCR
-        left_path, right_path = split_page_columns(work_path, tmp_dir, page_num)
-        work_path.unlink(missing_ok=True)
-
-        left_text, left_ok, _ = try_ocr(left_path)
-        right_text, right_ok, _ = try_ocr(right_path)
-
-        # Cleanup split images after OCR
-        for f in [left_path, right_path]:
-            with contextlib.suppress(OSError):
-                f.unlink()
-
-        if left_ok or right_ok:
-            combined = ""
-            if left_ok:
-                combined += left_text
-            if right_ok:
-                combined += "\n\n" + right_text
-            return PageResult(
-                number=page_num, text=combined.strip(), strategy="column-split", elapsed_s=0.0
-            )
-    except Exception:
-        _cleanup_page_tmpfiles(tmp_dir, page_num)
+    # Last resort: column-split (if not already tried via shortcut)
+    result = _try_column_split_ocr(src_image, tmp_dir, page_num)
+    if result is not None:
+        return result
 
     return PageResult(number=page_num, text=None, strategy="ALLE_FEHLGESCHLAGEN", elapsed_s=0.0)
 

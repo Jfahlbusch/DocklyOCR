@@ -569,19 +569,41 @@ def _is_pdf(path: Path) -> bool:
     return path.suffix.lower() == ".pdf"
 
 
+MAX_PARALLEL_PAGES: int = 4  # concurrent pages sent to Ollama (matches OLLAMA_NUM_PARALLEL)
+
+
+def _process_single_page(img_path: Path, page_num: int, tmp_dir: Path) -> PageResult:
+    """Full per-page pipeline: OCR strategies + table detection."""
+    page_result = _ocr_image_with_strategies(img_path, tmp_dir, page_num)
+
+    if page_result.text and _detect_table_patterns(page_result.text):
+        try:
+            table_text = _ocr_table(img_path)
+            if table_text.strip():
+                page_result.text = _html_table_to_markdown(table_text)
+                page_result.is_table = True
+        except Exception:
+            pass  # keep original text on table-OCR failure
+
+    return page_result
+
+
 def run_ocr(
     input_path: Path,
     tmp_dir: Path,
     output_path: Path | None = None,
     output_format: str = "md",
     pages_dir: Path | None = None,
+    max_parallel: int = MAX_PARALLEL_PAGES,
 ) -> OcrResult:
-    """Public entry point for the OCR pipeline (v5).
+    """Public entry point for the OCR pipeline (v5, parallelized).
 
-    If *output_path* is provided, results are written incrementally
-    for ``md`` and ``txt`` formats.  ``json`` and ``toon`` are written
-    in full at the end via :meth:`IncrementalWriter.finalize`.
+    Processes up to ``max_parallel`` pages concurrently via a thread pool.
+    Results are written incrementally (md/txt) in page order as contiguous
+    completions become available. json/toon are written in full at the end.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     input_path = Path(input_path)
     tmp_dir = Path(tmp_dir)
     suffix = input_path.suffix.lower()
@@ -608,31 +630,35 @@ def run_ocr(
     # 2. Writer (optional)
     writer = IncrementalWriter(output_path, output_format) if output_path else None
 
-    # 3. OCR + table detection per page
-    all_pages: list[PageResult] = []
-    for i, img_path in enumerate(page_images):
-        page_num = i + 1
-        page_result = _ocr_image_with_strategies(img_path, tmp_dir, page_num)
+    # 3. Parallel OCR (bounded by max_parallel; Ollama serves concurrently)
+    n = len(page_images)
+    results: list[PageResult | None] = [None] * n
+    next_to_write = 0
 
-        # Two-pass table detection
-        if page_result.text and _detect_table_patterns(page_result.text):
+    with ThreadPoolExecutor(max_workers=max(1, max_parallel)) as executor:
+        future_to_idx = {
+            executor.submit(_process_single_page, img, i + 1, tmp_dir): i
+            for i, img in enumerate(page_images)
+        }
+
+        for future in as_completed(future_to_idx):
+            i = future_to_idx[future]
             try:
-                table_text = _ocr_table(img_path)
-                if table_text.strip():
-                    # Convert HTML tables to Markdown if needed
-                    table_text = _html_table_to_markdown(table_text)
-                    page_result.text = table_text
-                    page_result.is_table = True
+                results[i] = future.result()
             except Exception:
-                pass  # keep original text on table-OCR failure
+                results[i] = PageResult(number=i + 1, text=None, strategy="ERROR", elapsed_s=0.0)
 
-        all_pages.append(page_result)
+            # Write out contiguous completed pages (preserves order)
+            while next_to_write < n and results[next_to_write] is not None:
+                # Merge boundary with previous page (if both present)
+                if next_to_write > 0 and results[next_to_write - 1] is not None:
+                    pair = [results[next_to_write - 1], results[next_to_write]]
+                    _merge_across_boundaries(pair)
+                if writer:
+                    writer.append_chunk([results[next_to_write]])
+                next_to_write += 1
 
-        # 4. Merge boundary with previous page + write immediately
-        if len(all_pages) >= 2:
-            _merge_across_boundaries(all_pages[-2:])
-        if writer:
-            writer.append_chunk([page_result])
+    all_pages = [p for p in results if p is not None]
 
     # 6. Build result
     pages_ok = sum(1 for p in all_pages if p.text)

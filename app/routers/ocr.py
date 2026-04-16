@@ -341,3 +341,163 @@ async def _run_async(request: Request, job: Job) -> JSONResponse:
             "status_url": f"/v1/jobs/{job.id}",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch upload: multiple files in a single request
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/ocr/batch",
+    summary="Submit multiple documents for OCR in a single request",
+    description=(
+        "Upload several files at once (max 50 per request). Each file is "
+        "validated independently and becomes its own Job — returned is a "
+        "list of job_ids that can be polled individually via /v1/jobs/{id}. "
+        "All jobs share the same output_format and webhook_url. Mode is "
+        "always async (sync would block for too long on a batch). The GPU "
+        "remains on throughout the batch and shuts down automatically "
+        "after the final job finishes."
+    ),
+    status_code=202,
+    tags=["ocr"],
+    responses={
+        202: {
+            "description": "Batch accepted — poll /v1/jobs/{id} for each job",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "count": 2,
+                        "jobs": [
+                            {
+                                "job_id": "abc123",
+                                "filename": "file1.pdf",
+                                "status_url": "/v1/jobs/abc123",
+                            },
+                            {
+                                "job_id": "def456",
+                                "filename": "file2.pdf",
+                                "status_url": "/v1/jobs/def456",
+                            },
+                        ],
+                    }
+                }
+            },
+        },
+        400: {"model": ErrorResponse, "description": "No files provided or bad format"},
+        401: {"model": ErrorResponse, "description": "Missing or invalid API key"},
+        413: {"model": ErrorResponse, "description": "One or more files exceed size limit"},
+        415: {"model": ErrorResponse, "description": "Unsupported MIME on one or more files"},
+        429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
+    },
+)
+async def submit_ocr_batch(
+    request: Request,
+    files: list[UploadFile] = File(...),  # noqa: B008
+    output_format: str = Form(...),
+    webhook_url: str | None = Form(None),
+    ctx: ApiKeyContext = Depends(enforce_rate_limit),  # noqa: B008
+    session: Session = Depends(get_session),  # noqa: B008
+):
+    # --- Validate output_format --------------------------------------------
+    try:
+        fmt_enum = OutputFormat(output_format)
+    except ValueError:
+        valid = ", ".join(f.value for f in OutputFormat)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid output_format '{output_format}'. Must be one of: {valid}",
+        ) from None
+
+    # --- Validate number of files ------------------------------------------
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > 50:
+        raise HTTPException(
+            status_code=400, detail=f"Too many files ({len(files)}). Max 50 per batch."
+        )
+
+    # --- Validate every file upfront (fail fast before creating any job) ---
+    file_data: list[tuple[UploadFile, bytes, str]] = []
+    for f in files:
+        mime = (f.content_type or "").split(";")[0].strip().lower()
+        if mime not in _ALLOWED_MIMES:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"Unsupported media type '{mime or 'unknown'}' for "
+                    f"'{f.filename or 'upload'}'. "
+                    f"Allowed: {sorted(_ALLOWED_MIMES)}"
+                ),
+            )
+        if f.size is not None and f.size > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File '{f.filename or 'upload'}' too large. "
+                    f"Max {settings.max_upload_bytes} bytes."
+                ),
+            )
+        data = await f.read()
+        if len(data) > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File '{f.filename or 'upload'}' exceeds size. "
+                    f"Max {settings.max_upload_bytes} bytes."
+                ),
+            )
+        file_data.append((f, data, mime))
+
+    # --- Create Jobs + persist uploads -------------------------------------
+    assert ctx.api_key.id is not None
+    assert ctx.customer.id is not None
+    created_jobs: list[Job] = []
+
+    for f, data, mime in file_data:
+        job = Job(
+            api_key_id=ctx.api_key.id,
+            customer_id=ctx.customer.id,
+            status=JobStatus.pending,
+            input_filename=f.filename or "upload",
+            input_size_bytes=len(data),
+            input_mime=mime,
+            output_format=fmt_enum,
+            webhook_url=webhook_url,
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+
+        try:
+            storage.save_upload(job.id, f.filename or "upload", data)
+        except OSError as e:
+            job.status = JobStatus.failed
+            job.error_message = f"Failed to persist upload: {e}"
+            job.finished_at = datetime.utcnow()
+            session.add(job)
+            session.commit()
+            continue
+
+        created_jobs.append(job)
+
+    # --- Enqueue all jobs on ARQ ------------------------------------------
+    pool = await get_arq_pool(request)
+    for job in created_jobs:
+        await pool.enqueue_job("process_ocr_job", job.id)
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "count": len(created_jobs),
+            "jobs": [
+                {
+                    "job_id": j.id,
+                    "filename": j.input_filename,
+                    "status_url": f"/v1/jobs/{j.id}",
+                }
+                for j in created_jobs
+            ],
+        },
+    )

@@ -8,9 +8,10 @@
       <th class="px-5 py-3">Status</th>
       <th class="px-5 py-3">Pages</th>
       <th class="px-5 py-3">Created</th>
+      <th class="px-5 py-3 text-right">Actions</th>
     </tr>
   </thead>
-  <tbody class="divide-y divide-slate-100">
+  <tbody class="divide-y divide-slate-100" id="jobs-table-body">
     {% for job in jobs %}
     <tr>
       <td class="px-5 py-3 font-mono text-xs text-slate-600">{{ job.id[:12] }}&hellip;</td>
@@ -19,6 +20,35 @@
       <td class="px-5 py-3">{% include "admin/_status_dot.html" %}<span class="text-slate-700">{{ job.status }}</span></td>
       <td class="px-5 py-3 text-slate-600 tnum">{{ job.page_count if job.page_count is not none else "—" }}</td>
       <td class="px-5 py-3 text-slate-500 tnum">{{ job.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td class="px-5 py-3 text-right whitespace-nowrap">
+        {% if job.status in ("pending", "processing") %}
+          <button
+            hx-post="/admin/jobs/{{ job.id }}/stop"
+            hx-target="#jobs-table"
+            hx-swap="innerHTML"
+            hx-confirm="Job wirklich stoppen?"
+            class="text-xs px-2 py-1 rounded-md border border-slate-200 text-slate-700 hover:bg-slate-50">
+            Stop
+          </button>
+        {% endif %}
+        {% if job.status == "failed" %}
+          <button
+            hx-post="/admin/jobs/{{ job.id }}/restart"
+            hx-target="#jobs-table"
+            hx-swap="innerHTML"
+            class="text-xs px-2 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white">
+            Restart
+          </button>
+        {% endif %}
+        <button
+          hx-post="/admin/jobs/{{ job.id }}/delete"
+          hx-target="#jobs-table"
+          hx-swap="innerHTML"
+          hx-confirm="Job und alle Dateien löschen?"
+          class="text-xs px-2 py-1 rounded-md border border-rose-200 text-rose-700 hover:bg-rose-50 ml-1">
+          Delete
+        </button>
+      </td>
     </tr>
     {% endfor %}
   </tbody>

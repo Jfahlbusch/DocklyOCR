@@ -440,6 +440,127 @@ async def jobs_list(
 
 
 # ---------------------------------------------------------------------------
+# Job actions: stop / restart / delete
+# ---------------------------------------------------------------------------
+
+
+def _jobs_table_fragment(request: Request, session: Session) -> Response:
+    """Render the jobs table fragment with current filters from query params."""
+    status = request.query_params.get("status") or None
+    customer_id_raw = request.query_params.get("customer_id")
+    customer_id = int(customer_id_raw) if customer_id_raw else None
+
+    statement = select(Job, Customer).join(Customer, Customer.id == Job.customer_id)
+    if status:
+        import contextlib
+
+        with contextlib.suppress(ValueError):
+            statement = statement.where(Job.status == JobStatus(status))
+    if customer_id is not None:
+        statement = statement.where(Job.customer_id == customer_id)
+    statement = statement.order_by(Job.created_at.desc()).limit(50)
+
+    rows = session.exec(statement).all()
+    jobs_view = [_job_row_view(job, customer.name) for job, customer in rows]
+    return templates.TemplateResponse(
+        request,
+        "admin/_jobs_table.html",
+        {"jobs": jobs_view},
+    )
+
+
+@router.post("/admin/jobs/{job_id}/stop", response_class=HTMLResponse)
+async def job_stop(
+    job_id: str,
+    request: Request,
+    session: Session = Depends(get_session),  # noqa: B008
+) -> Response:
+    redirect = _check_admin(request)
+    if redirect is not None:
+        return redirect
+
+    job = session.get(Job, job_id)
+    if job is not None and job.status in (JobStatus.pending, JobStatus.processing):
+        job.status = JobStatus.failed
+        job.error_message = "Manually stopped by admin"
+        job.finished_at = datetime.utcnow()
+        session.add(job)
+        session.commit()
+
+    if request.headers.get("hx-request", "").lower() == "true":
+        return _jobs_table_fragment(request, session)
+    return RedirectResponse("/admin/jobs", status_code=303)
+
+
+@router.post("/admin/jobs/{job_id}/restart", response_class=HTMLResponse)
+async def job_restart(
+    job_id: str,
+    request: Request,
+    session: Session = Depends(get_session),  # noqa: B008
+) -> Response:
+    redirect = _check_admin(request)
+    if redirect is not None:
+        return redirect
+
+    job = session.get(Job, job_id)
+    if job is not None:
+        # Verify input file still exists
+        from app.services.storage import storage
+
+        input_path = storage.get_input_path(job_id)
+        if input_path is not None and input_path.exists():
+            # Reset job state
+            job.status = JobStatus.pending
+            job.error_message = None
+            job.started_at = None
+            job.finished_at = None
+            job.page_count = None
+            job.pages_ok = None
+            job.pages_failed = None
+            job.result_path = None
+            job.result_mime = None
+            job.webhook_delivered = False
+            job.webhook_attempts = 0
+            session.add(job)
+            session.commit()
+
+            # Re-enqueue in ARQ
+            pool = getattr(request.app.state, "arq_pool", None)
+            if pool is not None:
+                import contextlib
+
+                with contextlib.suppress(Exception):
+                    await pool.enqueue_job("process_ocr_job", job.id)
+
+    if request.headers.get("hx-request", "").lower() == "true":
+        return _jobs_table_fragment(request, session)
+    return RedirectResponse("/admin/jobs", status_code=303)
+
+
+@router.post("/admin/jobs/{job_id}/delete", response_class=HTMLResponse)
+async def job_delete(
+    job_id: str,
+    request: Request,
+    session: Session = Depends(get_session),  # noqa: B008
+) -> Response:
+    redirect = _check_admin(request)
+    if redirect is not None:
+        return redirect
+
+    job = session.get(Job, job_id)
+    if job is not None:
+        from app.services.storage import storage
+
+        storage.delete_job(job_id)
+        session.delete(job)
+        session.commit()
+
+    if request.headers.get("hx-request", "").lower() == "true":
+        return _jobs_table_fragment(request, session)
+    return RedirectResponse("/admin/jobs", status_code=303)
+
+
+# ---------------------------------------------------------------------------
 # Unused imports kept for potential future use / satisfy type checkers
 # ---------------------------------------------------------------------------
 _ = hash_password  # noqa: F401 -- re-exported for test convenience

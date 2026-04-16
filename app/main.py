@@ -4,6 +4,7 @@ import httpx
 from arq.connections import RedisSettings, create_pool
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
@@ -98,10 +99,6 @@ app.include_router(admin.router)
 
 # Scalar API reference — modern UI that actually supports multi-file upload
 # (Swagger UI's "Try it out" fails on array<file>; ReDoc is read-only).
-# Served at /scalar, uses the same /openapi.json as /docs and /redoc.
-from fastapi.responses import HTMLResponse
-
-
 @app.get("/scalar", include_in_schema=False, response_class=HTMLResponse)
 async def scalar_docs() -> HTMLResponse:
     return HTMLResponse(

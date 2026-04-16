@@ -166,11 +166,17 @@ async def _schedule_webhook_retry(ctx, job_id: str) -> None:
 
 
 class WorkerSettings:
-    """ARQ worker configuration."""
+    """ARQ worker configuration.
+
+    ``max_jobs = 1``: Jobs are processed strictly sequentially. Within each
+    job, the pipeline fires MAX_PARALLEL_PAGES (12) concurrent requests to
+    vLLM — saturating the H100. Running multiple jobs in parallel would
+    create contention on the GPU and slow everything down.
+    """
 
     functions = [process_ocr_job, deliver_with_retry]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
-    max_jobs = 4
+    max_jobs = 1
     # Slightly above the subprocess pipeline timeout so the TimeoutExpired
     # branch above runs cleanly before ARQ gives up.
     job_timeout = _PIPELINE_TIMEOUT_S + 300

@@ -459,6 +459,7 @@ def run_ocr(
     tmp_dir: Path,
     output_path: Path | None = None,
     output_format: str = "md",
+    pages_dir: Path | None = None,
 ) -> OcrResult:
     """Public entry point for the OCR pipeline (v5).
 
@@ -477,6 +478,14 @@ def run_ocr(
 
     # 1. Extract pages
     page_images = _batch_extract_pages(input_path, tmp_dir) if _is_pdf(input_path) else [input_path]
+
+    # 1b. Persist page images to pages_dir (visible during processing)
+    if pages_dir and _is_pdf(input_path) and page_images:
+        import shutil
+
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        for img in page_images:
+            shutil.copy2(img, pages_dir / img.name)
 
     if not page_images:
         return OcrResult(pages=[], page_count=0, pages_ok=0, pages_failed=0)

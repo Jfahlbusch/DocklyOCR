@@ -63,7 +63,9 @@ async def process_ocr_job(ctx, job_id: str) -> str:
             with tempfile.TemporaryDirectory(prefix=f"ocr_{job_id}_") as tmp_dir_str:
                 tmp_dir = Path(tmp_dir_str)
                 result_json_path = tmp_dir / "result.json"
-                result_output_path = tmp_dir / f"result.{job.output_format.value}"
+                # Write incremental output + page images to STORAGE (persistent, visible)
+                result_output_path = storage.base_dir / job_id / f"result.{job.output_format.value}"
+                pages_dir = storage.base_dir / job_id / "pages"
                 subprocess.run(
                     [
                         sys.executable,
@@ -79,6 +81,8 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                         str(result_output_path),
                         "--output-format",
                         job.output_format.value,
+                        "--pages-dir",
+                        str(pages_dir),
                     ],
                     check=True,
                     timeout=_PIPELINE_TIMEOUT_S,

@@ -182,7 +182,7 @@ async def _schedule_webhook_retry(ctx, job_id: str) -> None:
     )
 
 
-async def after_job_end(ctx):
+async def on_job_end(ctx):
     """ARQ lifecycle hook — fires after ctx/redis state is cleaned up.
 
     Called once per job completion. Checks the queue depth and stops
@@ -204,7 +204,7 @@ class WorkerSettings:
     functions = [process_ocr_job, deliver_with_retry]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 1
-    after_job_end = after_job_end
+    on_job_end = on_job_end
     # Slightly above the subprocess pipeline timeout so the TimeoutExpired
     # branch above runs cleanly before ARQ gives up.
     job_timeout = _PIPELINE_TIMEOUT_S + 300

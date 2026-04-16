@@ -13,6 +13,7 @@ scheduled with ``_defer_by`` matching the configured backoff sequence.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -27,7 +28,7 @@ from app.config import settings
 from app.db import engine
 from app.models import Job, JobStatus
 from app.services.formatters import format_output
-from app.services.gpu_manager import ensure_gpu_running
+from app.services.gpu_manager import ensure_gpu_running, shutdown_gpu_if_idle
 from app.services.ocr_pipeline import OcrResult
 from app.services.storage import storage
 from app.services.webhook import MAX_ATTEMPTS, RETRY_DELAYS_S, deliver_webhook, deliver_with_retry
@@ -155,6 +156,10 @@ async def process_ocr_job(ctx, job_id: str) -> str:
         success = await deliver_webhook(job_id)
         if not success:
             await _schedule_webhook_retry(ctx, job_id)
+
+    # Proactive GPU shutdown if queue is empty (faster than 5-min GPU-side timer)
+    with contextlib.suppress(Exception):
+        await shutdown_gpu_if_idle(ctx.get("redis"))
 
     return "done"
 

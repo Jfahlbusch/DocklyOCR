@@ -96,3 +96,47 @@ def ensure_gpu_running() -> None:
         time.sleep(5)
 
     raise RuntimeError(f"OCR backend still not ready after {_BOOT_TIMEOUT_SECONDS}s boot window")
+
+
+def _scw_poweroff() -> None:
+    """Send power-off action to Scaleway. Idempotent."""
+    url = (
+        f"{_SCW_API_BASE}/zones/{settings.scw_gpu_zone}/servers/{settings.scw_gpu_server_id}/action"
+    )
+    headers = {
+        "X-Auth-Token": settings.scw_secret_key,
+        "Content-Type": "application/json",
+    }
+    try:
+        r = httpx.post(url, json={"action": "poweroff"}, headers=headers, timeout=15)
+        if r.status_code >= 400:
+            logger.warning("Scaleway poweroff returned %s: %s", r.status_code, r.text[:200])
+    except httpx.HTTPError as e:
+        logger.warning("Scaleway poweroff call failed: %s", e)
+
+
+async def shutdown_gpu_if_idle(redis_pool) -> None:
+    """Stop the GPU via Scaleway API if no jobs are queued or in-flight.
+
+    Called by the worker after each job completes. Gives immediate shutdown
+    without waiting for the 5-min GPU-side safety timer. If the call fails,
+    the GPU-side timer is the fallback.
+
+    ``redis_pool`` is the ARQ context's redis handle (``ctx["redis"]``).
+    """
+    if not _scw_configured():
+        return
+
+    # ARQ stores queued jobs in a sorted set at "arq:queue"
+    try:
+        if redis_pool is not None:
+            queued = await redis_pool.zcard("arq:queue")
+            if queued and queued > 0:
+                logger.info("GPU kept running: %d jobs still queued", queued)
+                return
+    except Exception as e:
+        logger.warning("Queue check failed (%s) — keeping GPU up as precaution", e)
+        return
+
+    logger.info("No pending jobs — stopping GPU via Scaleway API")
+    _scw_poweroff()

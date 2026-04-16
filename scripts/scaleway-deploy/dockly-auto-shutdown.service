@@ -1,0 +1,7 @@
+[Unit]
+Description=DocklyOCR GPU auto-shutdown check
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dockly-auto-shutdown

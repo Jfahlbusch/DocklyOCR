@@ -353,14 +353,18 @@ def _ocr_single_strategy(
     return None, 0.0
 
 
-def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) -> PageResult:
-    """Run all 13 strategies against a *single* image input (no PDF extraction).
+MAX_STRATEGIES: int = 5  # Only try the first N strategies (rest rarely help, burn timeout)
 
+
+def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) -> PageResult:
+    """Run strategies against a *single* image input (no PDF extraction).
+
+    Tries at most ``MAX_STRATEGIES`` (default 5) before giving up.
     Used when the input is already an image (jpg/png/tiff). Each strategy gets
     a fresh working copy of the source image so that the in-place resize never
     modifies the caller's file.
     """
-    for name, _dpi, max_px, gray, quality, split in STRATEGIES:
+    for name, _dpi, max_px, gray, quality, split in STRATEGIES[:MAX_STRATEGIES]:
         # Always operate on a fresh copy — never mutate the caller's source.
         work_path = tmp_dir / f"pg{page_num}.jpg"
         try:
@@ -511,26 +515,11 @@ def run_ocr(
 
         all_pages.append(page_result)
 
-        # 4. Every 3 pages: merge + write
-        if len(all_pages) >= 3 and len(all_pages) % 3 == 0:
-            chunk = all_pages[-3:]
-            _merge_across_boundaries(chunk)
-            if writer:
-                write_start = 0 if len(all_pages) == 3 else 1
-                writer.append_chunk(chunk[write_start:])
-
-    # 5. Remainder (last incomplete chunk)
-    remainder = len(all_pages) % 3
-    if remainder > 0:
-        if len(all_pages) > remainder:
-            chunk = [all_pages[-(remainder + 1)]] + all_pages[-remainder:]
-            _merge_across_boundaries(chunk)
-            if writer:
-                writer.append_chunk(chunk[1:])
-        else:
-            _merge_across_boundaries(all_pages)
-            if writer:
-                writer.append_chunk(all_pages)
+        # 4. Merge boundary with previous page + write immediately
+        if len(all_pages) >= 2:
+            _merge_across_boundaries(all_pages[-2:])
+        if writer:
+            writer.append_chunk([page_result])
 
     # 6. Build result
     pages_ok = sum(1 for p in all_pages if p.text)

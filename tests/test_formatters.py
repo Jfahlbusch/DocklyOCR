@@ -150,3 +150,47 @@ def test_format_returns_bytes_and_mime(sample_result: OcrResult, fmt: str) -> No
     assert isinstance(mime, str)
     assert len(mime) > 0
     assert len(body) > 0
+
+
+# ── is_table support ──────────────────────────────────────────────────
+
+
+def test_format_md_table_page_no_strategy_annotation():
+    from app.services.formatters import format_output
+    from app.services.ocr_pipeline import OcrResult, PageResult
+
+    result = OcrResult(
+        pages=[
+            PageResult(1, "Normal text.", "150dpi/1024px", 2.0, is_table=False),
+            PageResult(2, "| A | B |\n|---|---|\n| 1 | 2 |", "150dpi/1024px", 3.0, is_table=True),
+        ],
+        page_count=2,
+        pages_ok=2,
+        pages_failed=0,
+    )
+    body, mime = format_output(result, "md")
+    text = body.decode()
+    assert "> OCR-Strategie: `150dpi/1024px`" in text
+    assert text.count("> OCR-Strategie:") == 1  # only page 1
+    assert "| A | B |" in text
+
+
+def test_format_json_includes_is_table():
+    import json
+
+    from app.services.formatters import format_output
+    from app.services.ocr_pipeline import OcrResult, PageResult
+
+    result = OcrResult(
+        pages=[
+            PageResult(1, "text", "s", 1.0, is_table=False),
+            PageResult(2, "| A |", "s", 1.0, is_table=True),
+        ],
+        page_count=2,
+        pages_ok=2,
+        pages_failed=0,
+    )
+    body, _ = format_output(result, "json")
+    data = json.loads(body)
+    assert data["pages"][0]["is_table"] is False
+    assert data["pages"][1]["is_table"] is True

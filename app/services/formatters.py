@@ -37,7 +37,8 @@ def _format_md(result: OcrResult) -> bytes:
         if page.text is not None and page.text.strip():
             lines.append(page.text)
             lines.append("")
-            lines.append(f"> OCR-Strategie: `{page.strategy}`")
+            if not page.is_table:
+                lines.append(f"> OCR-Strategie: `{page.strategy}`")
         else:
             lines.append(
                 f"[OCR-Fehler auf Seite {page.number} — alle 13 Strategien fehlgeschlagen]"
@@ -118,6 +119,7 @@ def _format_json(result: OcrResult) -> bytes:
                 "text": p.text,
                 "strategy": p.strategy,
                 "elapsed_s": p.elapsed_s,
+                "is_table": p.is_table,
             }
             for p in result.pages
         ],

@@ -27,7 +27,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _SCW_API_BASE = "https://api.scaleway.com/instance/v1"
-_BOOT_TIMEOUT_SECONDS = 300  # 5 minutes from poweron to vLLM ready
+_BOOT_TIMEOUT_SECONDS = 600  # 10 min: GPU boot (20s) + vLLM load + CUDA graph compile
 
 
 def _scw_configured() -> bool:

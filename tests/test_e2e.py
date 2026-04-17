@@ -485,6 +485,55 @@ async def test_async_ocr_flow_with_simulated_worker(
 
 
 # ---------------------------------------------------------------------------
+# 4b) Worker marks job as failed when every page failed OCR
+# ---------------------------------------------------------------------------
+
+
+@needs_pdftoppm
+async def test_worker_marks_job_failed_when_all_pages_fail(
+    client: TestClient,
+    api_key: str,
+    session: Session,
+    db_engine,
+    tmp_storage: LocalStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the backend rejects every page, job.status must be ``failed``.
+
+    Prior behaviour marked the job ``done`` with ``pages_ok=0``, which
+    silently returned an empty result to the caller.
+    """
+    with SAMPLE_PDF.open("rb") as fh:
+        resp = client.post(
+            "/v1/ocr",
+            headers={"X-API-Key": api_key},
+            files={"file": ("sample.pdf", fh, "application/pdf")},
+            data={"output_format": "md", "mode": "async"},
+        )
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+
+    _install_worker_subprocess_shim(monkeypatch, db_engine)
+
+    def _always_fail(img_path: Path) -> str:  # noqa: ARG001
+        raise RuntimeError("backend not ready")
+
+    monkeypatch.setattr(ocr_pipeline_module, "_call_backend", _always_fail)
+
+    result = await ocr_worker_module.process_ocr_job({"redis": None}, job_id)
+    assert result == "done"
+
+    session.expire_all()
+    job = session.get(Job, job_id)
+    assert job is not None
+    assert job.status == JobStatus.failed
+    assert job.pages_ok == 0
+    assert job.page_count > 0
+    assert job.error_message is not None
+    assert "alle" in job.error_message.lower() or "seiten" in job.error_message.lower()
+
+
+# ---------------------------------------------------------------------------
 # 5) Webhook delivery on async done
 # ---------------------------------------------------------------------------
 

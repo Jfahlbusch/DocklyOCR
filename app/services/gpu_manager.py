@@ -29,6 +29,25 @@ logger = logging.getLogger(__name__)
 _SCW_API_BASE = "https://api.scaleway.com/instance/v1"
 _BOOT_TIMEOUT_SECONDS = 600  # 10 min: GPU boot (20s) + vLLM load + CUDA graph compile
 
+# 8x8 white JPEG — smallest payload that exercises the full vision pipeline.
+# Used by _backend_serves_inference() as a real warmup smoke-test so we don't
+# return from ensure_gpu_running() while vLLM still reports /v1/models=200
+# but answers 500 to real image requests (CUDA graph compile in progress).
+_SMOKE_JPEG_B64 = (
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8"
+    "lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7K"
+    "CIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/"
+    "wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8Q"
+    "AtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM"
+    "2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd"
+    "4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW1"
+    "9jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgc"
+    "ICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBC"
+    "SMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2h"
+    "panN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHy"
+    "MnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD2aiiigD//2Q=="
+)
+
 
 def _scw_configured() -> bool:
     return bool(
@@ -40,11 +59,55 @@ def _scw_configured() -> bool:
 
 
 def _backend_ready() -> bool:
-    """Quick check: is the vLLM backend responsive?"""
+    """Quick liveness check — vLLM has the model loaded.
+
+    Returns True as soon as ``/v1/models`` answers 200. This is *not* a
+    guarantee that inference works (CUDA graphs may still be compiling);
+    use :func:`_backend_serves_inference` for that.
+    """
     url = settings.backend_url.rstrip("/")
     try:
         r = httpx.get(f"{url}/v1/models", timeout=3.0)
         return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def _backend_serves_inference() -> bool:
+    """Real readiness probe — send a tiny image and require a 200 back.
+
+    Needed because vLLM's ``/v1/models`` starts answering 200 as soon as the
+    weights are loaded, but the first inference request can still 500 while
+    CUDA graphs are being compiled. Firing the pipeline's 12 parallel
+    requests during that window ends with ``pages_ok == 0`` for the whole
+    document.
+    """
+    url = settings.backend_url.rstrip("/")
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            r = client.post(
+                f"{url}/v1/chat/completions",
+                json={
+                    "model": settings.backend_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{_SMOKE_JPEG_B64}"
+                                    },
+                                },
+                                {"type": "text", "text": "ok"},
+                            ],
+                        }
+                    ],
+                    "max_tokens": 1,
+                    "temperature": 0.0,
+                },
+            )
+            return r.status_code == 200
     except httpx.HTTPError:
         return False
 
@@ -67,18 +130,21 @@ def _scw_poweron() -> None:
 
 
 def ensure_gpu_running() -> None:
-    """Block until the GPU backend is ready. Boot it via Scaleway API if needed.
+    """Block until the GPU backend can actually serve inference.
 
-    Flow:
-    1. Quick health check (3s) — if backend responds, return immediately
-    2. If not, power on via Scaleway API
-    3. Poll /v1/models (or /api/tags) every 5s until ready, max 5 min
-    4. Raise RuntimeError if still not ready after timeout
+    Two-stage readiness:
 
-    If Scaleway credentials aren't configured, skip the boot step and just
-    wait for the backend to come up (someone else is expected to start it).
+    1. ``/v1/models`` must answer 200 (liveness).
+    2. A real image-inference request must succeed (serving).
+
+    Stage 2 is what separates "model loaded" from "CUDA graphs compiled,
+    ready to serve". Without it the pipeline's 12 parallel requests can
+    land during warmup and all 500, yielding ``pages_ok == 0``.
+
+    Boots the GPU via Scaleway API when needed. No-op when Scaleway creds
+    aren't configured (caller is expected to start the backend).
     """
-    if _backend_ready():
+    if _backend_ready() and _backend_serves_inference():
         return
 
     if _scw_configured():
@@ -88,10 +154,15 @@ def ensure_gpu_running() -> None:
         logger.warning("Backend not ready and Scaleway credentials missing — will wait only")
 
     deadline = time.time() + _BOOT_TIMEOUT_SECONDS
+    logged_serving_wait = False
     while time.time() < deadline:
         if _backend_ready():
-            logger.info("Backend ready after boot")
-            return
+            if not logged_serving_wait:
+                logger.info("Backend live (/v1/models 200) — waiting for inference readiness")
+                logged_serving_wait = True
+            if _backend_serves_inference():
+                logger.info("Backend ready after boot (smoke test passed)")
+                return
         time.sleep(5)
 
     raise RuntimeError(f"OCR backend still not ready after {_BOOT_TIMEOUT_SECONDS}s boot window")

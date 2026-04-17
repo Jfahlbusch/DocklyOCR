@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import glob
+import logging
 import re
 import subprocess
 import time
@@ -31,6 +32,8 @@ import httpx
 from PIL import Image
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # ── Public dataclasses ────────────────────────────────────────────────
 
@@ -265,15 +268,33 @@ def split_page_columns(src_path: Path, tmp_dir: Path, page_num: int) -> tuple[Pa
 
 
 def try_ocr(img_path: Path, label: str = "") -> tuple[str, bool, float]:
-    """Try OCR, return (text, ok, elapsed_s)."""
+    """Try OCR, return (text, ok, elapsed_s).
+
+    Exceptions are captured and logged (so a flaky backend or warmup 500s
+    leave a debug trail) but not re-raised, because the outer strategy
+    loop needs to move on to the next attempt.
+    """
     try:
         t0 = time.time()
         text = _call_backend(img_path)
         elapsed = time.time() - t0
         if text.strip():
             return text.strip(), True, elapsed
+        logger.warning("OCR returned empty text (%s, %.1fs)", label or img_path.name, elapsed)
         return "", False, 0.0
-    except Exception:
+    except httpx.HTTPStatusError as e:
+        logger.warning(
+            "OCR HTTP %s for %s: %s",
+            e.response.status_code,
+            label or img_path.name,
+            e.response.text[:200],
+        )
+        return "", False, 0.0
+    except httpx.HTTPError as e:
+        logger.warning("OCR transport error for %s: %s", label or img_path.name, e)
+        return "", False, 0.0
+    except Exception as e:
+        logger.warning("OCR unexpected %s for %s: %s", type(e).__name__, label or img_path.name, e)
         return "", False, 0.0
 
 

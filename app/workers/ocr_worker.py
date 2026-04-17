@@ -138,7 +138,18 @@ async def process_ocr_job(ctx, job_id: str) -> str:
             session.commit()
             return "format_failed"
 
-        job.status = JobStatus.done
+        # Pipeline completed without crashing, but if *every* page failed
+        # we must not mark the job as ``done`` — a user polling the status
+        # would see success + get an empty result body. Treat it as a
+        # real failure so it's visible in the admin UI and retry-able.
+        if result.page_count > 0 and result.pages_ok == 0:
+            job.status = JobStatus.failed
+            job.error_message = (
+                f"OCR fehlgeschlagen auf allen {result.page_count} Seiten "
+                "(Backend hat alle Requests abgelehnt)."
+            )
+        else:
+            job.status = JobStatus.done
         job.finished_at = datetime.utcnow()
         job.page_count = result.page_count
         job.pages_ok = result.pages_ok

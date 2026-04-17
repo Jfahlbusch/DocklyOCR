@@ -1,9 +1,9 @@
 """ARQ worker for async OCR processing.
 
-The task ``process_ocr_job(job_id)`` runs the 13-strategy pipeline in a
-subprocess (via ``app.services.ocr_runner``) so that a segfault inside
-Ollama or ``pdftoppm`` never takes down the worker process — only the
-subprocess dies and the task marks the job as ``failed``.
+The task ``process_ocr_job(job_id)`` runs the OCR pipeline in a subprocess
+(via ``app.services.ocr_runner``) so that a segfault inside the backend
+HTTP client or ``pdftoppm`` never takes down the worker process — only
+the subprocess dies and the task marks the job as ``failed``.
 
 On completion, if a ``webhook_url`` is configured the task attempts one
 synchronous delivery via ``deliver_webhook``. On failure (and while we

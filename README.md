@@ -27,25 +27,20 @@ Self-hosted OCR API powered by **Qwen2.5-VL via vLLM**, with a multi-strategy fa
 Clients ▶│  Caddy → FastAPI        │──────▶│  vLLM + Qwen2.5-VL-7B   │
          │  ARQ worker             │        │  (/v1/chat/completions) │
          │  Redis (queue)          │        │                         │
-         │  SQLite (metadata)      │        │  OR  Ollama + glm-ocr   │
+         │  SQLite (metadata)      │        │  on a Scaleway GPU VM   │
          └─────────────────────────┘        └─────────────────────────┘
                                              ▲ auto-start via SCW API
                                              ▼ auto-stop when idle
 ```
 
-Two supported OCR backends, selected by `OLLAMA_USE_OPENAI_API`:
-
-| Backend | Use when | Model | Endpoint |
-|---|---|---|---|
-| **vLLM** (recommended for GPU) | H100 / L4 GPU available | Qwen2.5-VL-7B-Instruct | `/v1/chat/completions` |
-| **Ollama** | CPU-only or simple local dev | `glm-ocr` | `/api/generate` |
+The OCR backend is **vLLM** serving Qwen2.5-VL-7B-Instruct via an OpenAI-compatible API (`/v1/chat/completions` and `/v1/models`). It's configured by `BACKEND_URL`, `BACKEND_MODEL`, and `BACKEND_REQUEST_TIMEOUT_S` in `.env`.
 
 ## Prerequisites
 
 | Component | Notes |
 |---|---|
 | Docker + docker-compose | 24+ |
-| OCR backend | Either vLLM (Docker image `vllm/vllm-openai:latest`) or Ollama on host with `glm-ocr` pulled |
+| OCR backend | vLLM (Docker image `vllm/vllm-openai:latest`) serving Qwen2.5-VL-7B |
 | Python (dev only) | 3.11 for running tests locally |
 
 ## Quickstart (vLLM backend)
@@ -57,9 +52,8 @@ cd dockly-ocr
 cp .env.example .env
 
 # 2. Set the backend URL + credentials in .env
-#    OLLAMA_URL=http://<gpu-host>:8000
-#    OLLAMA_MODEL=qwen2.5-vl-7b
-#    OLLAMA_USE_OPENAI_API=true
+#    BACKEND_URL=http://<gpu-host>:8000
+#    BACKEND_MODEL=qwen2.5-vl-7b
 #
 #    Generate admin password hash + session secret:
 python scripts/hash_password.py 'your-strong-password'  # -> ADMIN_PASSWORD_HASH (escape $ as $$)
@@ -71,7 +65,7 @@ docker compose exec api python scripts/init_db.py
 
 # 4. Verify
 curl http://localhost:8000/health
-# {"status":"ok","ollama":"ok","db":"ok"}
+# {"status":"ok","backend":"ok","db":"ok"}
 ```
 
 Endpoints:
@@ -184,7 +178,7 @@ curl -H "X-API-Key: sk_live_xxx" http://localhost:8000/v1/jobs/<job_id>/result -
     reverse_proxy localhost:8000
   }
   ```
-  Expose only the API port — not the OCR backend's port (vLLM 8000 or Ollama 11434).
+  Expose only the API port (443 via Caddy) — not the vLLM backend port (8000).
 - **Backups:** SQLite DB at `./data/ocr.db` — nightly `cp` is enough with WAL mode.
 - **Cleanup:** the daily cleanup cron (see `scripts/cleanup_old_results.py`) deletes jobs older than `RESULT_TTL_DAYS` (default 30, set to 7 on the Scaleway setup).
 - **Scaling:** with vLLM the backend handles multi-request concurrency natively. Beyond a single GPU, put several backend instances behind a load balancer.
@@ -204,7 +198,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 
 For the dev server without docker you still need:
 - Redis (`docker run -d -p 6379:6379 redis:7-alpine`)
-- An OCR backend (either vLLM on a GPU or Ollama with `glm-ocr`)
+- A reachable vLLM backend serving `qwen2.5-vl-7b`
 - `.env` adjusted to your local ports and `DATABASE_URL=sqlite:///./data/ocr.db`
 
 ## Architecture Docs

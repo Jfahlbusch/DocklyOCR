@@ -1,7 +1,7 @@
 [project]
 name = "dockly-ocr"
 version = "0.1.0"
-description = "Self-hosted OCR API based on glm-ocr (Ollama) with multi-strategy fallback pipeline"
+description = "Self-hosted OCR API powered by Qwen2.5-VL via vLLM with multi-strategy fallback pipeline"
 requires-python = ">=3.11"
 readme = "README.md"
 authors = [

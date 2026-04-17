@@ -13,11 +13,10 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://redis:6379/0"
 
-    ollama_url: str = "http://host.docker.internal:11434"
-    ollama_model: str = "glm-ocr"
-    ollama_request_timeout_s: int = 120
-    # True = vLLM (OpenAI /v1/chat/completions), False = Ollama /api/generate
-    ollama_use_openai_api: bool = False
+    # OCR backend (vLLM with OpenAI-compatible /v1/chat/completions API)
+    backend_url: str = "http://127.0.0.1:8000"
+    backend_model: str = "qwen2.5-vl-7b"
+    backend_request_timeout_s: int = 120
 
     admin_username: str = "admin"
     admin_password_hash: str = ""

@@ -1,6 +1,6 @@
 """Tests for ``app.services.ocr_pipeline``.
 
-All tests mock ``httpx.Client.post`` so that no real Ollama call is made.
+All tests mock ``httpx.Client.post`` so that no real backend call is made.
 The PDF test is skipped automatically if ``pdftoppm``/``pdfinfo`` from
 ``poppler-utils`` are not available on the test runner.
 """
@@ -45,9 +45,9 @@ def tiny_pdf(tmp_path: Path) -> Path:
 
 
 def _mock_response(text: str = "OCR'd text for page 1") -> MagicMock:
-    """Build a fake httpx Response with the given OCR ``response`` text."""
+    """Build a fake httpx Response mimicking vLLM's OpenAI-compatible chat completion."""
     resp = MagicMock(spec=httpx.Response)
-    resp.json.return_value = {"response": text}
+    resp.json.return_value = {"choices": [{"message": {"content": text}}]}
     resp.raise_for_status.return_value = None
     return resp
 
@@ -110,7 +110,7 @@ def test_run_ocr_pdf_first_strategy_succeeds(tiny_pdf: Path, tmp_path: Path) -> 
 
 
 def test_run_ocr_all_strategies_fail(tiny_jpg: Path, tmp_path: Path) -> None:
-    """When every Ollama call raises, the page is marked as ALLE_FEHLGESCHLAGEN."""
+    """When every backend call raises, the page is marked as ALLE_FEHLGESCHLAGEN."""
     tmp_dir = tmp_path / "work"
     tmp_dir.mkdir()
 
@@ -241,7 +241,7 @@ def test_ocr_table_returns_markdown(monkeypatch, tmp_path):
             pass
 
         def json(self):
-            return {"response": "| A | B |\n|---|---|\n| 1 | 2 |"}
+            return {"choices": [{"message": {"content": "| A | B |\n|---|---|\n| 1 | 2 |"}}]}
 
     class FakeClient:
         def __init__(self, **kw):
@@ -254,7 +254,12 @@ def test_ocr_table_returns_markdown(monkeypatch, tmp_path):
             pass
 
         def post(self, url, **kw):
-            assert "Markdown table" in kw["json"]["prompt"]
+            # Assert the table-specific prompt is sent as the text part
+            # of the multimodal chat message.
+            text_parts = [
+                c["text"] for c in kw["json"]["messages"][0]["content"] if c.get("type") == "text"
+            ]
+            assert any("Markdown table" in t for t in text_parts)
             return FakeResponse()
 
     monkeypatch.setattr("app.services.ocr_pipeline.httpx.Client", FakeClient)
@@ -460,7 +465,7 @@ def test_run_ocr_with_output_path_writes_incrementally(tmp_path, monkeypatch):
 
         def json(self):  # noqa: ARG002
             call_count["n"] += 1
-            return {"response": f"Page {call_count['n']} text."}
+            return {"choices": [{"message": {"content": f"Page {call_count['n']} text."}}]}
 
     class FakeClient:
         def __init__(self, **kw):
@@ -500,7 +505,7 @@ def test_run_ocr_without_output_path_backward_compat(tmp_path, monkeypatch):
             pass
 
         def json(self):
-            return {"response": "Some text."}
+            return {"choices": [{"message": {"content": "Some text."}}]}
 
     class FakeClient:
         def __init__(self, **kw):

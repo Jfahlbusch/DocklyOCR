@@ -5,9 +5,10 @@ Run via:
         --output-json <path> [--output-path <path>] [--output-format md] \
         [--pages-dir <path>]
 
-Isolates Ollama crashes from the ARQ worker process: if the pipeline (or the
-underlying Ollama call) segfaults, only this subprocess dies — the worker
-catches ``CalledProcessError`` / ``TimeoutExpired`` and continues serving jobs.
+Isolates backend and subprocess crashes from the ARQ worker: if the pipeline
+(pdftoppm, Pillow, or an HTTP error from the OCR backend) segfaults, only
+this subprocess dies — the worker catches ``CalledProcessError`` /
+``TimeoutExpired`` and continues serving jobs.
 """
 
 from __future__ import annotations

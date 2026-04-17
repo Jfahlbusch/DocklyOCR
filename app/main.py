@@ -120,13 +120,11 @@ async def scalar_docs() -> HTMLResponse:
 
 
 async def _check_backend() -> str:
-    """Ping the configured OCR backend (vLLM or Ollama). Returns a short status."""
+    """Ping the vLLM backend. Returns a short status."""
     try:
-        url = settings.ollama_url.rstrip("/")
-        # vLLM exposes /v1/models (OpenAI-compat), Ollama exposes /api/tags
-        path = "/v1/models" if settings.ollama_use_openai_api else "/api/tags"
+        url = settings.backend_url.rstrip("/")
         async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"{url}{path}")
+            r = await client.get(f"{url}/v1/models")
             if r.status_code == 200:
                 return "ok"
             return f"status_{r.status_code}"
@@ -153,9 +151,9 @@ async def _check_db() -> str:
     summary="Service health probe",
     description=(
         "Returns the combined readiness status of the API, its database, and "
-        "the OCR backend (vLLM or Ollama). Public endpoint: no authentication "
-        "required. Intended for load balancers, uptime monitors, and "
-        "Kubernetes readiness probes."
+        "the vLLM OCR backend. Public endpoint: no authentication required. "
+        "Intended for load balancers, uptime monitors, and Kubernetes "
+        "readiness probes."
     ),
     response_model=HealthResponse,
 )
@@ -165,8 +163,6 @@ async def health():
     overall = "ok" if backend_status == "ok" and db_status == "ok" else "degraded"
     return {
         "status": overall,
-        # Field kept as "ollama" for backward-compat with existing clients,
-        # but covers the vLLM backend too.
-        "ollama": backend_status,
+        "backend": backend_status,
         "db": db_status,
     }

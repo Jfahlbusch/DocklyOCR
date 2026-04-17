@@ -40,11 +40,10 @@ def _scw_configured() -> bool:
 
 
 def _backend_ready() -> bool:
-    """Quick check: is the OCR backend (vLLM or Ollama) responsive?"""
-    url = settings.ollama_url.rstrip("/")
-    path = "/v1/models" if settings.ollama_use_openai_api else "/api/tags"
+    """Quick check: is the vLLM backend responsive?"""
+    url = settings.backend_url.rstrip("/")
     try:
-        r = httpx.get(f"{url}{path}", timeout=3.0)
+        r = httpx.get(f"{url}/v1/models", timeout=3.0)
         return r.status_code == 200
     except httpx.HTTPError:
         return False

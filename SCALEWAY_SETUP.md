@@ -154,10 +154,9 @@ Edit:
 
 ```ini
 # Backend points at the GPU via the private network (port 8000 on the GPU's private IP)
-OLLAMA_URL=http://172.16.8.3:8000
-OLLAMA_MODEL=qwen2.5-vl-7b
-OLLAMA_USE_OPENAI_API=true
-OLLAMA_REQUEST_TIMEOUT_S=120
+BACKEND_URL=http://172.16.8.3:8000
+BACKEND_MODEL=qwen2.5-vl-7b
+BACKEND_REQUEST_TIMEOUT_S=120
 
 # Admin credentials — escape every $ as $$ for docker-compose
 ADMIN_PASSWORD_HASH=$$2b$$12$$...
@@ -244,7 +243,7 @@ Example: 10 jobs/day × ~4 min/job (cold-start) + ~2 min idle each → ~1 GPU-ho
 
 ## Troubleshooting
 
-**`{"ollama":"unreachable"}` on `/health`**
+**`{"backend":"unreachable"}` on `/health`**
 - GPU is probably powered off. Worker will auto-start it on the next job.
 - Check private-network connectivity: `ssh root@<API> curl -v http://172.16.8.3:8000/v1/models`
 

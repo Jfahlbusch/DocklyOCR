@@ -1,20 +1,20 @@
 """End-to-end integration tests for DocklyOCR.
 
 These tests wire the real ``app.main.app`` FastAPI instance against an
-in-memory SQLite engine, a temp storage dir, and a mocked Ollama call —
+in-memory SQLite engine, a temp storage dir, and a mocked backend call —
 then exercise the full request path: HTTP -> router -> auth -> pipeline
 -> formatter -> storage -> (for async) worker -> webhook.
 
 The only external calls stubbed out are:
 
-* ``_call_ollama`` in ``app.services.ocr_pipeline`` — replaced with a
+* ``_call_backend`` in ``app.services.ocr_pipeline`` — replaced with a
   function returning a canned OCR string so the 13-strategy pipeline
   picks the first strategy and succeeds immediately.
 * ``subprocess.run`` inside ``app.workers.ocr_worker`` — replaced with
   an in-process shim that invokes the real ``run_ocr`` pipeline and
   serializes the ``OcrResult`` to the JSON file the worker expects. This
   is done because the real subprocess would not inherit the
-  ``_call_ollama`` monkey-patch.
+  ``_call_backend`` monkey-patch.
 * ``httpx.AsyncClient`` factory inside ``app.services.webhook`` — replaced
   with a ``httpx.MockTransport`` that captures the outbound POST.
 
@@ -64,7 +64,7 @@ needs_pdftoppm = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# Engine / session / storage / Ollama mock
+# Engine / session / storage / backend mock
 # ---------------------------------------------------------------------------
 
 
@@ -107,18 +107,18 @@ def tmp_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalStorage
 
 
 @pytest.fixture()
-def mocked_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch ``_call_ollama`` so the pipeline runs end-to-end but never hits Ollama.
+def mocked_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch ``_call_backend`` so the pipeline runs end-to-end without calling the OCR backend.
 
-    Because ``try_ocr`` resolves ``_call_ollama`` by module-level name lookup
-    at call time, patching ``app.services.ocr_pipeline._call_ollama`` is
+    Because ``try_ocr`` resolves ``_call_backend`` by module-level name lookup
+    at call time, patching ``app.services.ocr_pipeline._call_backend`` is
     enough — no need to reach into ``try_ocr`` itself.
     """
 
-    def _fake_call_ollama(img_path: Path) -> str:  # noqa: ARG001
+    def _fake_call_backend(img_path: Path) -> str:  # noqa: ARG001
         return FAKE_OCR_TEXT
 
-    monkeypatch.setattr(ocr_pipeline_module, "_call_ollama", _fake_call_ollama)
+    monkeypatch.setattr(ocr_pipeline_module, "_call_backend", _fake_call_backend)
 
 
 @pytest.fixture()
@@ -143,7 +143,7 @@ def reset_rate_limiter() -> Iterator[None]:
 def client(
     db_engine,
     tmp_storage: LocalStorage,  # noqa: ARG001 -- ensure storage is patched
-    mocked_ollama,  # noqa: ARG001 -- ensure Ollama is mocked before requests
+    mocked_backend,  # noqa: ARG001 -- ensure backend is mocked before requests
     reset_rate_limiter,  # noqa: ARG001 -- ensure clean rate-limit state
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[TestClient]:
@@ -236,8 +236,8 @@ def api_key(session: Session) -> str:
 def test_health_endpoint(client: TestClient, db_engine, monkeypatch: pytest.MonkeyPatch) -> None:
     """``GET /health`` should return a valid JSON shape.
 
-    We don't assert ``status: ok`` because ``/health`` calls the real Ollama
-    ``/api/tags`` endpoint which isn't mocked in this test (the ``_call_ollama``
+    We don't assert ``status: ok`` because ``/health`` calls the real backend
+    ``/api/tags`` endpoint which isn't mocked in this test (the ``_call_backend``
     mock only kicks in on the pipeline path). The only guarantee is that the
     db subsystem reports ``ok`` given we've wired an in-memory SQLite engine.
     """
@@ -250,10 +250,10 @@ def test_health_endpoint(client: TestClient, db_engine, monkeypatch: pytest.Monk
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"status", "ollama", "db"}
+    assert set(body.keys()) == {"status", "backend", "db"}
     assert body["status"] in {"ok", "degraded"}
     assert body["db"] == "ok"
-    assert body["ollama"] in {"ok", "unreachable"} or body["ollama"].startswith("status_")
+    assert body["backend"] in {"ok", "unreachable"} or body["backend"].startswith("status_")
 
 
 def _check_db_factory(engine):
@@ -361,13 +361,13 @@ def test_sync_ocr_all_formats(
 def _install_worker_subprocess_shim(monkeypatch: pytest.MonkeyPatch, db_engine) -> None:
     """Replace the worker's ``subprocess`` alias so the pipeline runs in-process.
 
-    Also stubs out ``ensure_gpu_running`` — tests use mocked Ollama calls
+    Also stubs out ``ensure_gpu_running`` — tests use mocked backend calls
     and never hit the real backend or the Scaleway API.
 
     The real worker shells out to ``python -m app.services.ocr_runner`` which
-    would bypass our monkey-patched ``_call_ollama``. Instead we parse the
+    would bypass our monkey-patched ``_call_backend``. Instead we parse the
     CLI args the worker would have used, run ``run_ocr`` directly (which
-    *does* see the mocked Ollama), and write the JSON file the worker
+    *does* see the mocked backend), and write the JSON file the worker
     expects on the happy path — returning a ``CompletedProcess`` with
     ``returncode=0``.
 
@@ -378,9 +378,7 @@ def _install_worker_subprocess_shim(monkeypatch: pytest.MonkeyPatch, db_engine) 
     real ``subprocess.run`` as a safety net.
     """
     # Stub out GPU auto-start — tests run without a real GPU backend
-    monkeypatch.setattr(
-        "app.workers.ocr_worker.ensure_gpu_running", lambda: None
-    )
+    monkeypatch.setattr("app.workers.ocr_worker.ensure_gpu_running", lambda: None)
 
     real_run = subprocess.run
 

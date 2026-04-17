@@ -12,23 +12,38 @@ set -euo pipefail
 source /etc/dockly/scw-credentials
 
 IDLE_FILE="/tmp/dockly-last-activity"
-IDLE_THRESHOLD_SECONDS=30  # shut down fast — H100 is expensive
+IDLE_THRESHOLD_SECONDS=120  # shut down after 2 min idle — H100 is expensive
 
-# Check if Ollama has a model loaded (= recent/current inference)
-MODEL_LOADED=$(curl -sf http://localhost:11434/api/ps 2>/dev/null \
-    | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    print('1' if d.get('models', []) else '0')
-except:
-    print('0')
-" 2>/dev/null || echo "0")
+VLLM_URL="http://localhost:8000"
+
+# Reset idle timer if vLLM is busy OR still warming up.
+#
+# "Busy" = vLLM reports any running/waiting requests in its Prometheus
+# metrics. "Warming up" = the container is started but /v1/models is
+# not yet 200 (CUDA graph compile on cold start takes ~3 min and must
+# not be killed, or the worker's ensure_gpu_running() polls forever).
+ACTIVE=0
+
+# 1) Loading phase — container running but API not ready yet
+if systemctl is-active --quiet vllm; then
+    if ! curl -sf --max-time 2 "${VLLM_URL}/v1/models" > /dev/null 2>&1; then
+        ACTIVE=1
+    fi
+fi
+
+# 2) Serving phase — any in-flight or queued requests
+if [ "$ACTIVE" = "0" ]; then
+    RUNNING=$(curl -sf --max-time 2 "${VLLM_URL}/metrics" 2>/dev/null \
+        | awk '/^vllm:num_requests_(running|waiting)\{/ {sum += $2} END {print sum+0}')
+    if [ -n "${RUNNING:-}" ] && [ "${RUNNING%.*}" -gt 0 ] 2>/dev/null; then
+        ACTIVE=1
+    fi
+fi
 
 NOW=$(date +%s)
 
-# Active model → reset idle timer, keep GPU running
-if [ "$MODEL_LOADED" = "1" ]; then
+# Active → reset idle timer, keep GPU running
+if [ "$ACTIVE" = "1" ]; then
     date +%s > "$IDLE_FILE"
     exit 0
 fi

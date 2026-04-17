@@ -4,7 +4,7 @@ These tests build a minimal FastAPI app that mounts only the OCR router and
 the content-length middleware, then overrides the ``get_session`` dependency
 with a test SQLite engine and monkey-patches the OCR pipeline + storage.
 
-No real Redis, Ollama, or network calls are made.
+No real Redis, backend, or network calls are made.
 """
 
 from __future__ import annotations

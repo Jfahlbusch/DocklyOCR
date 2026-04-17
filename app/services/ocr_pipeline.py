@@ -1,16 +1,19 @@
-"""DocklyOCR Pipeline v5 — port of Anhang C reference code.
+"""DocklyOCR OCR pipeline.
 
-This module provides the canonical OCR pipeline used by DocklyOCR. It is
-intentionally a 1:1 port of the bewährte v4 multi-strategy pipeline from the
-spec's Anhang C, with the following deliberate adjustments for production use:
+Entry point: :func:`run_ocr` — takes a PDF or image and returns an
+``OcrResult`` with per-page text. The pipeline:
 
-* `sips` (macOS-only) is replaced by Pillow's ``thumbnail`` for resizing.
-* Module-level constants are replaced by ``app.config.settings`` injection.
-* HTTP calls go through ``httpx.Client`` (consistent with the rest of the app).
-* The pipeline returns an ``OcrResult`` dataclass instead of writing files.
-
-The 13 strategies, split logic and grayscale handling are preserved verbatim
-from the reference implementation.
+1. Extracts all PDF pages upfront via ``pdftoppm`` (single subprocess call).
+2. Processes pages in parallel (``MAX_PARALLEL_PAGES``) against the OCR
+   backend (vLLM with Qwen2.5-VL via OpenAI-compatible chat completions).
+3. For each page, tries up to ``MAX_STRATEGIES`` render strategies
+   (DPI/resize/grayscale combinations) and falls back to a left/right
+   column split for multi-column layouts.
+4. Optionally runs a second pass with a table-specific prompt for pages
+   whose text looks like a table.
+5. Merges across page boundaries to recover sentences split over pages.
+6. Writes incrementally into ``md``/``txt`` output (or all at once for
+   ``json``/``toon``) via :class:`IncrementalWriter`.
 """
 
 from __future__ import annotations
@@ -80,23 +83,18 @@ class OcrResult:
         )
 
 
-# ── Strategies (1:1 from Anhang C) ────────────────────────────────────
+# ── Strategies ────────────────────────────────────────────────────────
 
 # (name, dpi, max_px, grayscale, quality, split)
+# Five render variants — first-match wins. The first strategy handles
+# the vast majority of pages; the others are progressive fallbacks for
+# difficult pages (lower DPI, grayscale, split).
 STRATEGIES: list[tuple[str, int, int, bool, int, bool]] = [
     ("150dpi/1024px", 150, 1024, False, 85, False),
     ("100dpi/768px", 100, 768, False, 85, False),
     ("72dpi/512px", 72, 512, False, 80, False),
     ("150dpi/1024px/gray", 150, 1024, True, 85, False),
     ("100dpi/768px/gray", 100, 768, True, 80, False),
-    ("72dpi/512px/gray", 72, 512, True, 75, False),
-    ("100dpi/400px/compress", 100, 400, False, 50, False),
-    ("72dpi/400px/gray/comp", 72, 400, True, 50, False),
-    ("150dpi/split", 150, 1024, False, 80, True),
-    ("100dpi/split/gray", 100, 768, True, 75, True),
-    ("72dpi/300px/gray/comp", 72, 300, True, 40, False),
-    ("150dpi/600px", 150, 600, False, 80, False),
-    ("100dpi/600px/gray", 100, 600, True, 75, False),
 ]
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -144,25 +142,6 @@ def _detect_table_patterns(text: str) -> bool:
     return matches / len(lines) >= 0.3
 
 
-def _html_table_to_markdown(html: str) -> str:
-    """Convert an HTML table to Markdown table format."""
-    if "<table" not in html.lower() and "<tr" not in html.lower():
-        return html
-    lines: list[str] = []
-    # Extract rows
-    row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
-    cell_pattern = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.DOTALL | re.IGNORECASE)
-    rows = row_pattern.findall(html)
-    for i, row_html in enumerate(rows):
-        cells = cell_pattern.findall(row_html)
-        # Strip nested HTML tags from cell content
-        clean_cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
-        lines.append("| " + " | ".join(clean_cells) + " |")
-        if i == 0:
-            lines.append("| " + " | ".join("---" for _ in clean_cells) + " |")
-    return "\n".join(lines) if lines else html
-
-
 def _ocr_table(img_path: Path) -> str:
     """Re-OCR with table-specific prompt. Returns Markdown table text."""
     return _call_vision_backend(img_path, _TABLE_PROMPT).strip()
@@ -182,88 +161,41 @@ _TABLE_PROMPT = (
 )
 
 
-def _call_ollama(img_path: Path) -> str:
-    """Send image to the configured OCR backend. Returns transcribed text.
-
-    The setting ``OLLAMA_URL`` drives the backend:
-    - ``http://host:11434`` → Ollama (``/api/generate`` with ``prompt: 'OCR'``)
-    - ``http://host:8000``  → vLLM (OpenAI ``/v1/chat/completions``)
-
-    The function auto-detects based on the URL path.
-    """
+def _call_backend(img_path: Path) -> str:
+    """Send image to the OCR backend with the OCR prompt, return text."""
     return _call_vision_backend(img_path, _OCR_PROMPT)
 
 
 def _call_vision_backend(img_path: Path, prompt: str) -> str:
+    """POST an image + prompt to the vLLM chat-completions endpoint."""
     with open(img_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
 
-    url = settings.ollama_url.rstrip("/")
-    timeout = settings.ollama_request_timeout_s
-
-    # vLLM / OpenAI-compatible API (port 8000, /v1/chat/completions)
-    if settings.ollama_use_openai_api:
-        with httpx.Client(timeout=timeout) as client:
-            r = client.post(
-                f"{url}/v1/chat/completions",
-                json={
-                    "model": settings.ollama_model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                                },
-                                {"type": "text", "text": prompt},
-                            ],
-                        }
-                    ],
-                    "max_tokens": 4096,
-                    "temperature": 0.0,
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-            return data["choices"][0]["message"]["content"]
-
-    # Ollama native API
-    with httpx.Client(timeout=timeout) as client:
+    url = settings.backend_url.rstrip("/")
+    with httpx.Client(timeout=settings.backend_request_timeout_s) as client:
         r = client.post(
-            f"{url}/api/generate",
+            f"{url}/v1/chat/completions",
             json={
-                "model": settings.ollama_model,
-                "prompt": "OCR" if prompt == _OCR_PROMPT else prompt,
-                "images": [b64],
-                "stream": False,
+                "model": settings.backend_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                "max_tokens": 4096,
+                "temperature": 0.0,
             },
         )
         r.raise_for_status()
-        return r.json().get("response", "")
-
-
-def extract_page_image(pdf_path: Path, page_num: int, dpi: int, tmp_dir: Path) -> Path | None:
-    """Extract single page via pdftoppm, return image path."""
-    prefix = tmp_dir / f"pg{page_num}"
-    subprocess.run(
-        [
-            "pdftoppm",
-            "-r",
-            str(dpi),
-            "-jpeg",
-            "-f",
-            str(page_num),
-            "-l",
-            str(page_num),
-            str(pdf_path),
-            str(prefix),
-        ],
-        capture_output=True,
-        timeout=30,
-    )
-    candidates = glob.glob(f"{prefix}*.jpg")
-    return Path(candidates[0]) if candidates else None
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
 
 
 def _resize_image_inplace(img_path: Path, max_px: int) -> None:
@@ -336,21 +268,13 @@ def try_ocr(img_path: Path, label: str = "") -> tuple[str, bool, float]:
     """Try OCR, return (text, ok, elapsed_s)."""
     try:
         t0 = time.time()
-        text = _call_ollama(img_path)
+        text = _call_backend(img_path)
         elapsed = time.time() - t0
         if text.strip():
             return text.strip(), True, elapsed
         return "", False, 0.0
     except Exception:
         return "", False, 0.0
-
-
-def get_page_count(pdf_path: Path) -> int:
-    r = subprocess.run(["pdfinfo", str(pdf_path)], capture_output=True, text=True, timeout=10)
-    for line in r.stdout.splitlines():
-        if line.startswith("Pages:"):
-            return int(line.split(":")[1].strip())
-    return 0
 
 
 def _cleanup_page_tmpfiles(tmp_dir: Path, page_num: int) -> None:
@@ -426,7 +350,7 @@ def _ocr_single_strategy(
     return None, 0.0
 
 
-MAX_STRATEGIES: int = 5  # Only try the first N strategies (rest rarely help, burn timeout)
+MAX_STRATEGIES: int = len(STRATEGIES)  # try all configured strategies
 
 
 def _detect_columns(img_path: Path) -> bool:
@@ -475,7 +399,7 @@ def _try_column_split_ocr(src_image: Path, tmp_dir: Path, page_num: int) -> Page
     """Try left/right column split OCR sequentially.
 
     Kept sequential because concurrent left+right + parallel page workers
-    exceeded Ollama's slots → queuing + timeouts → quality regressions.
+    exceeded the backend's slots → queuing + timeouts → quality regressions.
 
     Returns PageResult on success, None on failure.
     """
@@ -546,28 +470,6 @@ def _ocr_image_with_strategies(src_image: Path, tmp_dir: Path, page_num: int) ->
     return PageResult(number=page_num, text=None, strategy="ALLE_FEHLGESCHLAGEN", elapsed_s=0.0)
 
 
-def _ocr_pdf_page(pdf_path: Path, page_num: int, tmp_dir: Path) -> PageResult:
-    # v4 legacy — retained for direct use and existing tests
-    """Try all strategies for a PDF page until one succeeds."""
-    for name, dpi, max_px, gray, quality, split in STRATEGIES:
-        # 1) Extract page image at the strategy's DPI
-        img_path = extract_page_image(pdf_path, page_num, dpi, tmp_dir)
-        if img_path is None:
-            _cleanup_page_tmpfiles(tmp_dir, page_num)
-            continue
-
-        text, elapsed = _ocr_single_strategy(
-            img_path, tmp_dir, page_num, name, max_px, gray, quality, split
-        )
-
-        _cleanup_page_tmpfiles(tmp_dir, page_num)
-
-        if text is not None:
-            return PageResult(number=page_num, text=text, strategy=name, elapsed_s=elapsed)
-
-    return PageResult(number=page_num, text=None, strategy="ALLE_FEHLGESCHLAGEN", elapsed_s=0.0)
-
-
 # ── Incremental writer ────────────────────────────────────────────────
 
 
@@ -629,7 +531,7 @@ def _process_single_page(img_path: Path, page_num: int, tmp_dir: Path) -> PageRe
         try:
             table_text = _ocr_table(img_path)
             if table_text.strip():
-                page_result.text = _html_table_to_markdown(table_text)
+                page_result.text = table_text
                 page_result.is_table = True
         except Exception:
             pass  # keep original text on table-OCR failure
@@ -679,7 +581,7 @@ def run_ocr(
     # 2. Writer (optional)
     writer = IncrementalWriter(output_path, output_format) if output_path else None
 
-    # 3. Parallel OCR (bounded by max_parallel; Ollama serves concurrently)
+    # 3. Parallel OCR (bounded by max_parallel; backend serves concurrently)
     n = len(page_images)
     results: list[PageResult | None] = [None] * n
     next_to_write = 0

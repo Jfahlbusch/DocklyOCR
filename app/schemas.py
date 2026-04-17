@@ -25,13 +25,11 @@ class HealthResponse(BaseModel):
         examples=["ok"],
         description="Overall health: ``ok`` when every dependency reports healthy, otherwise ``degraded``.",
     )
-    ollama: str = Field(
+    backend: str = Field(
         ...,
         examples=["ok"],
         description=(
-            "Status of the OCR backend (vLLM or Ollama): ``ok``, "
-            "``unreachable``, or ``status_<code>``. Field name kept for "
-            "backward compatibility with existing clients."
+            "Status of the vLLM OCR backend: ``ok``, ``unreachable``, or ``status_<code>``."
         ),
     )
     db: str = Field(

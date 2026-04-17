@@ -57,9 +57,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="DocklyOCR",
     description=(
-        "Self-hosted OCR API based on glm-ocr (Ollama) with a 13-strategy "
-        "multi-fallback pipeline. Accepts PDFs and images, returns Markdown, "
-        "plain text, TOON, or JSON synchronously or via webhook."
+        "Self-hosted OCR API powered by Qwen2.5-VL via vLLM, with a "
+        "multi-strategy fallback pipeline (column-split detection, "
+        "re-scans, table re-prompt). Accepts PDFs and images, returns "
+        "Markdown, plain text, TOON, or JSON — synchronously, async via "
+        "webhook, or batched."
     ),
     version="0.1.0",
     openapi_tags=OPENAPI_TAGS,
@@ -117,10 +119,11 @@ async def scalar_docs() -> HTMLResponse:
     )
 
 
-async def _check_ollama() -> str:
+async def _check_backend() -> str:
+    """Ping the configured OCR backend (vLLM or Ollama). Returns a short status."""
     try:
         url = settings.ollama_url.rstrip("/")
-        # Auto-detect backend: vLLM → /v1/models, Ollama → /api/tags
+        # vLLM exposes /v1/models (OpenAI-compat), Ollama exposes /api/tags
         path = "/v1/models" if settings.ollama_use_openai_api else "/api/tags"
         async with httpx.AsyncClient(timeout=2.0) as client:
             r = await client.get(f"{url}{path}")
@@ -150,18 +153,20 @@ async def _check_db() -> str:
     summary="Service health probe",
     description=(
         "Returns the combined readiness status of the API, its database, and "
-        "the Ollama backend. Public endpoint: no authentication required. "
-        "Intended for load balancers, uptime monitors, and Kubernetes "
-        "readiness probes."
+        "the OCR backend (vLLM or Ollama). Public endpoint: no authentication "
+        "required. Intended for load balancers, uptime monitors, and "
+        "Kubernetes readiness probes."
     ),
     response_model=HealthResponse,
 )
 async def health():
-    ollama_status = await _check_ollama()
+    backend_status = await _check_backend()
     db_status = await _check_db()
-    overall = "ok" if ollama_status == "ok" and db_status == "ok" else "degraded"
+    overall = "ok" if backend_status == "ok" and db_status == "ok" else "degraded"
     return {
         "status": overall,
-        "ollama": ollama_status,
+        # Field kept as "ollama" for backward-compat with existing clients,
+        # but covers the vLLM backend too.
+        "ollama": backend_status,
         "db": db_status,
     }

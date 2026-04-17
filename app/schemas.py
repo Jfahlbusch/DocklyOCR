@@ -28,7 +28,11 @@ class HealthResponse(BaseModel):
     ollama: str = Field(
         ...,
         examples=["ok"],
-        description="Status of the Ollama backend (``ok``, ``unreachable``, or ``status_<code>``).",
+        description=(
+            "Status of the OCR backend (vLLM or Ollama): ``ok``, "
+            "``unreachable``, or ``status_<code>``. Field name kept for "
+            "backward compatibility with existing clients."
+        ),
     )
     db: str = Field(
         ...,

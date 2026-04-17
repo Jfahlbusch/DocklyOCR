@@ -1,91 +1,142 @@
 #!/usr/bin/env bash
-# ── DocklyOCR GPU Server Setup (Scaleway L4-1-24G) ──────────────────
+# ── DocklyOCR GPU Server Setup (Scaleway H100-1-80G / L4-1-24G) ─────────
 #
-# Run this ONCE on a fresh Ubuntu 22.04 GPU instance.
-# Prerequisites: SSH access, root or sudo.
+# Run this ONCE on a fresh Ubuntu 24.04 "GPU OS" instance, AFTER attaching
+# a persistent block-storage volume (min 60 GB) for /var/lib/docker.
 #
-# Architecture:
-#   - Ollama runs natively (systemd, GPU access, bound to 127.0.0.1)
-#   - DocklyOCR runs in Docker (api + worker + redis)
-#   - Caddy handles HTTPS
-#   - Auto-shutdown after idle (no jobs for 15 min)
+# Prerequisites: SSH as root, a persistent 60GB+ volume attached as /dev/sdb
+# (Scaleway's /scratch is EPHEMERAL — cleared on every stop/start).
+#
+# Architecture set up here:
+#   - Docker with root on persistent volume (/dev/sdb → /var/lib/docker)
+#   - vLLM Docker container running Qwen2.5-VL-7B-Instruct (bfloat16)
+#   - Model cache on the same persistent volume so cold-starts are fast
+#   - Auto-shutdown timer (systemd) that calls Scaleway API to poweroff
+#     the instance when idle — no billing when no jobs are running
 #
 set -euo pipefail
 
-echo "=== 1/7 System packages ==="
+echo "=== 1/8  System packages ==="
 apt-get update
 apt-get install -y --no-install-recommends \
-    docker.io docker-compose-plugin \
-    caddy \
-    poppler-utils \
-    curl \
-    jq
+    ca-certificates curl jq
 
-systemctl enable --now docker
+echo "=== 2/8  Docker (from docker.com repo) ==="
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-echo "=== 2/7 Install Ollama ==="
-curl -fsSL https://ollama.com/install.sh | sh
-systemctl enable --now ollama
+echo "=== 3/8  Persistent Docker storage on /dev/sdb ==="
+NEW_DEV=/dev/sdb
+if ! blkid "$NEW_DEV" > /dev/null 2>&1; then
+    echo "Formatting $NEW_DEV (first-time setup) ..."
+    mkfs.ext4 -F -L docker-data "$NEW_DEV"
+fi
+UUID=$(blkid -s UUID -o value "$NEW_DEV")
 
-# Wait for Ollama to be ready
-echo "Waiting for Ollama..."
-until curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; do sleep 2; done
+# Mount persistently across reboots
+rm -rf /var/lib/docker
+mkdir -p /var/lib/docker
+grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /var/lib/docker ext4 defaults,nofail 0 2" >> /etc/fstab
+mount /var/lib/docker || true
 
-echo "=== 3/7 Pull glm-ocr model ==="
-ollama pull glm-ocr
+# containerd stores image ingests somewhere, relocate to persistent volume
+mkdir -p /var/lib/docker/_containerd
+cat > /etc/containerd/config.toml << EOF
+version = 2
+root = "/var/lib/docker/_containerd"
+state = "/run/containerd"
+EOF
 
-echo "=== 4/7 Clone and configure DocklyOCR ==="
-if [ ! -d /opt/dockly-ocr ]; then
-    echo "IMPORTANT: Clone the repo to /opt/dockly-ocr first!"
-    echo "  git clone <your-repo-url> /opt/dockly-ocr"
-    echo "Then re-run this script."
-    exit 1
+systemctl enable --now containerd docker
+sleep 3
+docker info | grep "Root Dir"
+
+echo "=== 4/8  Pull vLLM image ==="
+docker pull vllm/vllm-openai:latest
+mkdir -p /var/lib/docker/vllm-cache
+
+echo "=== 5/8  Install vLLM systemd service ==="
+cat > /etc/systemd/system/vllm.service << 'SVC'
+[Unit]
+Description=vLLM OpenAI-compatible server (Qwen2.5-VL-7B)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+ExecStartPre=-/usr/bin/docker stop vllm
+ExecStartPre=-/usr/bin/docker rm vllm
+ExecStart=/usr/bin/docker run --rm --name vllm --gpus all --ipc=host \
+  -p 0.0.0.0:8000:8000 \
+  -v /var/lib/docker/vllm-cache:/root/.cache/huggingface \
+  vllm/vllm-openai:latest \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dtype bfloat16 \
+  --max-model-len 32768 \
+  --gpu-memory-utilization 0.85 \
+  --limit-mm-per-prompt '{"image":1}' \
+  --served-model-name qwen2.5-vl-7b
+ExecStop=/usr/bin/docker stop vllm
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+systemctl daemon-reload
+systemctl enable --now vllm
+echo "vLLM starting — model will download on first boot (~15 GB, ~5 min)."
+echo "Subsequent boots reuse the cached weights from the persistent volume."
+
+echo "=== 6/8  Scaleway credentials for auto-shutdown ==="
+if [ ! -f /etc/dockly/scw-credentials ]; then
+    mkdir -p /etc/dockly
+    cat > /etc/dockly/scw-credentials << EOF
+SCW_ACCESS_KEY=REPLACE_ME
+SCW_SECRET_KEY=REPLACE_ME
+SCW_GPU_SERVER_ID=REPLACE_ME
+SCW_GPU_ZONE=fr-par-2
+EOF
+    chmod 600 /etc/dockly/scw-credentials
+    echo ""
+    echo "*** EDIT /etc/dockly/scw-credentials with your Scaleway API keys. ***"
+    echo ""
 fi
 
-cd /opt/dockly-ocr
-
-if [ ! -f .env ]; then
-    cp .env.example .env
-    echo ""
-    echo "IMPORTANT: Edit /opt/dockly-ocr/.env — set these values:"
-    echo "  OLLAMA_URL=http://localhost:11434"
-    echo "  ADMIN_PASSWORD_HASH=<bcrypt hash>"
-    echo "  SESSION_SECRET=<random 48+ chars>"
-    echo ""
-    echo "Generate with:"
-    echo "  python3 scripts/hash_password.py 'your-password'"
-    echo "  python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
-    exit 1
-fi
-
-echo "=== 5/7 Initialize database ==="
-# Install Python deps for init script (host-side, one-time)
-apt-get install -y python3-pip python3-venv
-python3 -m venv /opt/dockly-ocr/.venv-host
-/opt/dockly-ocr/.venv-host/bin/pip install -q -e "/opt/dockly-ocr[dev]"
-/opt/dockly-ocr/.venv-host/bin/python scripts/init_db.py
-
-echo "=== 6/7 Start Docker stack ==="
-docker compose up -d --build
-
-echo "=== 7/7 Setup auto-shutdown ==="
-# Install the idle-shutdown timer (see auto-shutdown.sh)
-cp scripts/scaleway-deploy/auto-shutdown.sh /usr/local/bin/dockly-auto-shutdown
+echo "=== 7/8  Install auto-shutdown timer ==="
+cp "$(dirname "$0")/auto-shutdown.sh" /usr/local/bin/dockly-auto-shutdown
 chmod +x /usr/local/bin/dockly-auto-shutdown
-cp scripts/scaleway-deploy/dockly-auto-shutdown.service /etc/systemd/system/
-cp scripts/scaleway-deploy/dockly-auto-shutdown.timer /etc/systemd/system/
+cp "$(dirname "$0")/dockly-auto-shutdown.service" /etc/systemd/system/
+cp "$(dirname "$0")/dockly-auto-shutdown.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now dockly-auto-shutdown.timer
 
-echo "=== 8/8 Setup daily cleanup cron (delete jobs older than 7 days) ==="
-CRON_LINE="0 3 * * * cd /opt/dockly-ocr && .venv-host/bin/python scripts/cleanup_old_results.py --delete --days 7 >> /var/log/dockly-cleanup.log 2>&1"
-(crontab -l 2>/dev/null | grep -v "cleanup_old_results" ; echo "$CRON_LINE") | crontab -
+echo "=== 8/8  Firewall ==="
+if command -v ufw > /dev/null; then
+    ufw --force reset
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow 22/tcp comment "SSH"
+    # vLLM port reachable ONLY from the Scaleway private network
+    ufw allow from 172.16.8.0/22 to any port 8000 proto tcp comment "vLLM from PN"
+    ufw --force enable
+    ufw status verbose
+fi
 
 echo ""
 echo "=== DONE ==="
-echo "API:    http://$(hostname -I | awk '{print $1}'):8000"
-echo "Admin:  http://$(hostname -I | awk '{print $1}'):8000/admin"
-echo "Health: curl http://localhost:8000/health"
+echo "  vLLM service:  systemctl status vllm"
+echo "  Model status:  curl http://localhost:8000/v1/models"
+echo "  Auto-shutdown: GPU powers off after the idle threshold (120s idle)"
+echo "                 via Scaleway API, so no GPU billing when idle."
 echo ""
-echo "Auto-shutdown: GPU will power off after 2 min idle (no processing jobs)."
-echo "To disable: systemctl disable dockly-auto-shutdown.timer"
+echo "Next: edit /etc/dockly/scw-credentials with real SCW API keys,"
+echo "then test end-to-end by uploading a document via the API server."

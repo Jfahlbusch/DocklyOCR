@@ -39,6 +39,37 @@ class Settings(BaseSettings):
     scw_gpu_server_id: str = ""
     scw_gpu_zone: str = "fr-par-2"
 
+    # Optional fallback GPU: used when the primary returns out_of_stock.
+    # If set, both ``scw_gpu_server_id_fallback`` and ``backend_url_fallback``
+    # must be configured together. Zone defaults to the primary's zone.
+    scw_gpu_server_id_fallback: str = ""
+    scw_gpu_zone_fallback: str = ""
+    backend_url_fallback: str = ""
+
+    @property
+    def gpu_candidates(self) -> list[tuple[str, str, str, str]]:
+        """Ordered list of ``(label, server_id, zone, backend_url)`` for GPU selection.
+
+        Primary first, then fallback if configured. Entries without a
+        server_id are skipped.
+        """
+        out: list[tuple[str, str, str, str]] = []
+        if self.scw_gpu_server_id:
+            out.append(
+                ("primary", self.scw_gpu_server_id, self.scw_gpu_zone, self.backend_url)
+            )
+        if self.scw_gpu_server_id_fallback and self.backend_url_fallback:
+            zone = self.scw_gpu_zone_fallback or self.scw_gpu_zone
+            out.append(
+                (
+                    "fallback",
+                    self.scw_gpu_server_id_fallback,
+                    zone,
+                    self.backend_url_fallback,
+                )
+            )
+        return out
+
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024

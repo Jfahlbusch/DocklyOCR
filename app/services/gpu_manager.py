@@ -1,24 +1,31 @@
 """On-demand GPU management via Scaleway API.
 
-Called by the ARQ worker before each OCR job. If the GPU instance is
-powered off, this module boots it and waits until vLLM is responsive.
-Already-running GPUs are detected via a quick health ping — no Scaleway
-API call needed.
+Called by the ARQ worker before each OCR job. Supports a primary GPU plus
+an optional fallback that is tried when the primary returns ``out_of_stock``
+(a recurring scenario for H100 in Scaleway). Already-running GPUs are
+detected via a quick health ping — no Scaleway API call needed.
 
-Requires these settings (optional — only used if all are set):
+Requires these settings for the primary (optional — no-op if empty):
 
     scw_access_key      — Scaleway API access key
     scw_secret_key      — Scaleway API secret key
-    scw_gpu_server_id   — Instance UUID of the GPU server
+    scw_gpu_server_id   — Instance UUID of the primary GPU server
     scw_gpu_zone        — Zone (e.g. fr-par-2)
 
-If any are empty, this module is a no-op (assumes GPU is always on).
+Optional fallback (both must be set together):
+
+    scw_gpu_server_id_fallback  — Instance UUID of the fallback GPU
+    backend_url_fallback        — vLLM URL of the fallback GPU
+
+If the primary lacks a server_id the module is a no-op (caller is expected
+to start the backend).
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from typing import Literal
 
 import httpx
 
@@ -29,10 +36,12 @@ logger = logging.getLogger(__name__)
 _SCW_API_BASE = "https://api.scaleway.com/instance/v1"
 _BOOT_TIMEOUT_SECONDS = 600  # 10 min: GPU boot (20s) + vLLM load + CUDA graph compile
 
+PowerOnResult = Literal["ok", "out_of_stock", "error"]
+
 # 8x8 white JPEG — smallest payload that exercises the full vision pipeline.
 # Used by _backend_serves_inference() as a real warmup smoke-test so we don't
-# return from ensure_gpu_running() while vLLM still reports /v1/models=200
-# but answers 500 to real image requests (CUDA graph compile in progress).
+# return while vLLM still reports /v1/models=200 but answers 500 to real
+# image requests (CUDA graph compile in progress).
 _SMOKE_JPEG_B64 = (
     "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8"
     "lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7K"
@@ -50,22 +59,17 @@ _SMOKE_JPEG_B64 = (
 
 
 def _scw_configured() -> bool:
+    """True iff Scaleway API credentials + at least one GPU are set."""
     return bool(
         settings.scw_access_key
         and settings.scw_secret_key
-        and settings.scw_gpu_server_id
-        and settings.scw_gpu_zone
+        and settings.gpu_candidates
     )
 
 
-def _backend_ready() -> bool:
-    """Quick liveness check — vLLM has the model loaded.
-
-    Returns True as soon as ``/v1/models`` answers 200. This is *not* a
-    guarantee that inference works (CUDA graphs may still be compiling);
-    use :func:`_backend_serves_inference` for that.
-    """
-    url = settings.backend_url.rstrip("/")
+def _backend_ready(backend_url: str) -> bool:
+    """Quick liveness check — vLLM has the model loaded."""
+    url = backend_url.rstrip("/")
     try:
         r = httpx.get(f"{url}/v1/models", timeout=3.0)
         return r.status_code == 200
@@ -73,16 +77,14 @@ def _backend_ready() -> bool:
         return False
 
 
-def _backend_serves_inference() -> bool:
+def _backend_serves_inference(backend_url: str) -> bool:
     """Real readiness probe — send a tiny image and require a 200 back.
 
     Needed because vLLM's ``/v1/models`` starts answering 200 as soon as the
     weights are loaded, but the first inference request can still 500 while
-    CUDA graphs are being compiled. Firing the pipeline's 12 parallel
-    requests during that window ends with ``pages_ok == 0`` for the whole
-    document.
+    CUDA graphs are being compiled.
     """
-    url = settings.backend_url.rstrip("/")
+    url = backend_url.rstrip("/")
     try:
         with httpx.Client(timeout=30.0) as client:
             r = client.post(
@@ -112,92 +114,144 @@ def _backend_serves_inference() -> bool:
         return False
 
 
-def _scw_poweron() -> None:
-    """Send power-on action to Scaleway. Safe if already running."""
-    url = (
-        f"{_SCW_API_BASE}/zones/{settings.scw_gpu_zone}/servers/{settings.scw_gpu_server_id}/action"
-    )
+def _scw_action(action: str, server_id: str, zone: str) -> tuple[int, str]:
+    """POST a power action to Scaleway. Returns ``(status_code, body)``.
+
+    Caller is responsible for interpreting the result. Network failures
+    return ``(0, str(exc))``.
+    """
+    url = f"{_SCW_API_BASE}/zones/{zone}/servers/{server_id}/action"
     headers = {
         "X-Auth-Token": settings.scw_secret_key,
         "Content-Type": "application/json",
     }
     try:
-        r = httpx.post(url, json={"action": "poweron"}, headers=headers, timeout=15)
-        if r.status_code >= 400:
-            logger.warning("Scaleway poweron returned %s: %s", r.status_code, r.text[:200])
+        r = httpx.post(url, json={"action": action}, headers=headers, timeout=15)
+        return r.status_code, r.text[:500]
     except httpx.HTTPError as e:
-        logger.warning("Scaleway poweron call failed: %s", e)
+        return 0, str(e)
 
 
-def ensure_gpu_running() -> None:
-    """Block until the GPU backend can actually serve inference.
+def _scw_poweron(server_id: str, zone: str) -> PowerOnResult:
+    """Request Scaleway poweron. Differentiates out_of_stock from other errors.
 
-    Two-stage readiness:
-
-    1. ``/v1/models`` must answer 200 (liveness).
-    2. A real image-inference request must succeed (serving).
-
-    Stage 2 is what separates "model loaded" from "CUDA graphs compiled,
-    ready to serve". Without it the pipeline's 12 parallel requests can
-    land during warmup and all 500, yielding ``pages_ok == 0``.
-
-    Boots the GPU via Scaleway API when needed. No-op when Scaleway creds
-    aren't configured (caller is expected to start the backend).
+    - 200/2xx → ``"ok"`` (or server was already running)
+    - 412 with ``"out_of_stock"`` in body → ``"out_of_stock"``
+    - anything else → ``"error"``
     """
-    if _backend_ready() and _backend_serves_inference():
-        return
+    status, body = _scw_action("poweron", server_id, zone)
+    if 200 <= status < 300:
+        return "ok"
+    if status == 412 and "out_of_stock" in body:
+        logger.warning("Scaleway poweron %s: out_of_stock", server_id[:8])
+        return "out_of_stock"
+    logger.warning("Scaleway poweron %s returned %s: %s", server_id[:8], status, body[:200])
+    return "error"
 
-    if _scw_configured():
-        logger.info("Backend not ready — requesting Scaleway poweron")
-        _scw_poweron()
-    else:
-        logger.warning("Backend not ready and Scaleway credentials missing — will wait only")
 
+def _scw_poweroff(server_id: str, zone: str) -> None:
+    """Idempotent power-off. Logs warnings but never raises."""
+    status, body = _scw_action("poweroff", server_id, zone)
+    if status >= 400:
+        logger.warning("Scaleway poweroff %s returned %s: %s", server_id[:8], status, body[:200])
+
+
+def ensure_any_gpu_running() -> str:
+    """Block until *some* configured GPU can serve inference.
+
+    Tries candidates in order (primary first). For each candidate:
+
+    1. If it already answers /v1/models=200 and passes the inference
+       smoke-test, return its URL immediately.
+    2. Otherwise request a Scaleway poweron. If Scaleway reports
+       ``out_of_stock``, skip to the next candidate without waiting.
+    3. Poll readiness for up to ``_BOOT_TIMEOUT_SECONDS``. On success
+       return the URL; on timeout move to the next candidate.
+
+    Returns the backend URL of the GPU that is ready. Raises
+    ``RuntimeError`` if no candidate becomes ready.
+    """
+    candidates = settings.gpu_candidates
+    if not candidates:
+        # No Scaleway config — assume the operator runs the backend themselves.
+        # Caller (worker) falls back to settings.backend_url.
+        logger.warning("No GPU candidates configured — returning primary URL as-is")
+        return settings.backend_url
+
+    # Fast path: any candidate already serving?
+    for label, _server_id, _zone, backend_url in candidates:
+        if _backend_ready(backend_url) and _backend_serves_inference(backend_url):
+            logger.info("GPU %s already ready at %s", label, backend_url)
+            return backend_url
+
+    if not (settings.scw_access_key and settings.scw_secret_key):
+        logger.warning("Scaleway credentials missing — will wait only on primary")
+        # Fall through to the polling loop on the first candidate
+        return _wait_for_backend(candidates[0][3])
+
+    last_error: str | None = None
+    for label, server_id, zone, backend_url in candidates:
+        logger.info("Trying GPU %s (%s)", label, server_id[:8])
+        outcome = _scw_poweron(server_id, zone)
+        if outcome == "out_of_stock":
+            logger.info("GPU %s out of stock — trying next candidate", label)
+            last_error = f"{label} out_of_stock"
+            continue
+        if outcome == "error":
+            logger.warning("GPU %s poweron errored — trying next candidate", label)
+            last_error = f"{label} poweron error"
+            continue
+        # "ok" — wait for this one to serve.
+        try:
+            return _wait_for_backend(backend_url)
+        except RuntimeError as e:
+            logger.warning("GPU %s did not become ready: %s", label, e)
+            last_error = f"{label} boot timeout"
+            continue
+
+    raise RuntimeError(f"No GPU became ready. Last: {last_error or 'unknown'}")
+
+
+def _wait_for_backend(backend_url: str) -> str:
+    """Poll until ``backend_url`` passes the inference smoke-test, or time out.
+
+    Returns ``backend_url`` on success. Raises ``RuntimeError`` on timeout.
+    """
     deadline = time.time() + _BOOT_TIMEOUT_SECONDS
     logged_serving_wait = False
     while time.time() < deadline:
-        if _backend_ready():
+        if _backend_ready(backend_url):
             if not logged_serving_wait:
-                logger.info("Backend live (/v1/models 200) — waiting for inference readiness")
+                logger.info("Backend %s live (/v1/models 200) — waiting for inference", backend_url)
                 logged_serving_wait = True
-            if _backend_serves_inference():
-                logger.info("Backend ready after boot (smoke test passed)")
-                return
+            if _backend_serves_inference(backend_url):
+                logger.info("Backend %s ready (smoke test passed)", backend_url)
+                return backend_url
         time.sleep(5)
-
-    raise RuntimeError(f"OCR backend still not ready after {_BOOT_TIMEOUT_SECONDS}s boot window")
-
-
-def _scw_poweroff() -> None:
-    """Send power-off action to Scaleway. Idempotent."""
-    url = (
-        f"{_SCW_API_BASE}/zones/{settings.scw_gpu_zone}/servers/{settings.scw_gpu_server_id}/action"
+    raise RuntimeError(
+        f"Backend {backend_url} not ready after {_BOOT_TIMEOUT_SECONDS}s boot window"
     )
-    headers = {
-        "X-Auth-Token": settings.scw_secret_key,
-        "Content-Type": "application/json",
-    }
-    try:
-        r = httpx.post(url, json={"action": "poweroff"}, headers=headers, timeout=15)
-        if r.status_code >= 400:
-            logger.warning("Scaleway poweroff returned %s: %s", r.status_code, r.text[:200])
-    except httpx.HTTPError as e:
-        logger.warning("Scaleway poweroff call failed: %s", e)
+
+
+def ensure_gpu_running() -> None:
+    """Legacy entry point — kept for existing call sites.
+
+    Delegates to :func:`ensure_any_gpu_running` and discards the return value.
+    New callers should use ``ensure_any_gpu_running()`` directly and pass the
+    URL to the pipeline.
+    """
+    ensure_any_gpu_running()
 
 
 async def shutdown_gpu_if_idle(redis_pool) -> None:
-    """Stop the GPU via Scaleway API if no jobs are queued or in-flight.
+    """Stop all configured GPUs via Scaleway API if no jobs are queued.
 
-    Called by the worker after each job completes. Gives immediate shutdown
-    without waiting for the 5-min GPU-side safety timer. If the call fails,
-    the GPU-side timer is the fallback.
-
-    ``redis_pool`` is the ARQ context's redis handle (``ctx["redis"]``).
+    Iterates over all GPU candidates (primary + fallback) and issues poweroff
+    to each. Scaleway's poweroff is idempotent on already-archived servers.
     """
     if not _scw_configured():
         return
 
-    # ARQ stores queued jobs in a sorted set at "arq:queue"
     try:
         if redis_pool is not None:
             queued = await redis_pool.zcard("arq:queue")
@@ -208,5 +262,7 @@ async def shutdown_gpu_if_idle(redis_pool) -> None:
         logger.warning("Queue check failed (%s) — keeping GPU up as precaution", e)
         return
 
-    logger.info("No pending jobs — stopping GPU via Scaleway API")
-    _scw_poweroff()
+    logger.info("No pending jobs — stopping all configured GPUs")
+    for label, server_id, zone, _ in settings.gpu_candidates:
+        logger.info("Power off %s (%s)", label, server_id[:8])
+        _scw_poweroff(server_id, zone)

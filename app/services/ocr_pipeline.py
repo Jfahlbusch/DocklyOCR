@@ -543,6 +543,10 @@ def _is_pdf(path: Path) -> bool:
 
 MAX_PARALLEL_PAGES: int = 12  # vLLM on H100 handles high concurrency cleanly
 
+# If the first N pages all fail with zero successes, the backend is dead —
+# abort the pipeline instead of burning the full page budget on 500s.
+CIRCUIT_BREAKER_FAILED_THRESHOLD: int = 3
+
 
 def _process_single_page(img_path: Path, page_num: int, tmp_dir: Path) -> PageResult:
     """Full per-page pipeline: OCR strategies + table detection."""
@@ -613,12 +617,34 @@ def run_ocr(
             for i, img in enumerate(page_images)
         }
 
+        failed_so_far = 0
+        ok_so_far = 0
         for future in as_completed(future_to_idx):
             i = future_to_idx[future]
             try:
                 results[i] = future.result()
             except Exception:
                 results[i] = PageResult(number=i + 1, text=None, strategy="ERROR", elapsed_s=0.0)
+
+            if results[i].text:
+                ok_so_far += 1
+            else:
+                failed_so_far += 1
+
+            # Circuit breaker: if the first several pages all fail with zero
+            # successes, the backend is unreachable/broken. Abort before
+            # firing more requests at it so the job surfaces a real error
+            # instead of burning the full page budget.
+            if (
+                failed_so_far >= CIRCUIT_BREAKER_FAILED_THRESHOLD
+                and ok_so_far == 0
+            ):
+                for f in future_to_idx:
+                    f.cancel()
+                raise RuntimeError(
+                    f"OCR-Backend nicht erreichbar: erste {failed_so_far} Seiten "
+                    "alle fehlgeschlagen, keine erfolgreich — Abbruch."
+                )
 
             # Write out contiguous completed pages (preserves order)
             while next_to_write < n and results[next_to_write] is not None:

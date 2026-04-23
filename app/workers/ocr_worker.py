@@ -14,6 +14,7 @@ scheduled with ``_defer_by`` matching the configured backoff sequence.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,7 @@ from app.config import settings
 from app.db import engine
 from app.models import Job, JobStatus
 from app.services.formatters import format_output
-from app.services.gpu_manager import ensure_gpu_running
+from app.services.gpu_manager import ensure_any_gpu_running
 from app.services.ocr_pipeline import OcrResult
 from app.services.storage import storage
 from app.services.webhook import MAX_ATTEMPTS, RETRY_DELAYS_S, deliver_webhook, deliver_with_retry
@@ -60,16 +61,17 @@ async def process_ocr_job(ctx, job_id: str) -> str:
             session.commit()
             return "missing_input"
 
-        # On-demand GPU: boot via Scaleway API if the backend is offline.
-        # No-op if already running or Scaleway creds not configured.
+        # On-demand GPU: boot primary via Scaleway API, fall through to
+        # fallback on out_of_stock. Returns the active backend URL which
+        # the subprocess picks up via the ``BACKEND_URL`` env var.
         try:
-            ensure_gpu_running()
+            backend_url = ensure_any_gpu_running()
         except RuntimeError as e:
             with Session(engine) as s2:
                 j2 = s2.get(Job, job_id)
                 if j2 is not None:
                     j2.status = JobStatus.failed
-                    j2.error_message = f"GPU boot timeout: {e}"
+                    j2.error_message = f"GPU boot failed: {e}"
                     j2.finished_at = datetime.utcnow()
                     s2.add(j2)
                     s2.commit()
@@ -102,6 +104,7 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                     ],
                     check=True,
                     timeout=_PIPELINE_TIMEOUT_S,
+                    env={**os.environ, "BACKEND_URL": backend_url},
                 )
                 result_data = json.loads(result_json_path.read_text())
                 result = OcrResult.from_json_dict(result_data)

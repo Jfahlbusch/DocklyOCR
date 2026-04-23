@@ -131,6 +131,33 @@ def test_run_ocr_all_strategies_fail(tiny_jpg: Path, tmp_path: Path) -> None:
     assert page.elapsed_s == 0.0
 
 
+def test_run_ocr_circuit_breaker_trips_on_all_failing_backend(tmp_path: Path) -> None:
+    """Multi-page PDF with a dead backend: pipeline aborts early.
+
+    Without the circuit breaker every page would waste time retrying the
+    broken backend before the job eventually fails with ``pages_ok == 0``.
+    With the breaker, ``run_ocr`` raises a ``RuntimeError`` as soon as the
+    first N pages are confirmed failures and no success has been seen.
+    """
+    # Build a 6-page PDF so there's room for the threshold (3) to trigger.
+    pdf_path = tmp_path / "multi.pdf"
+    pages = [Image.new("RGB", (64, 64), color="white") for _ in range(6)]
+    pages[0].save(pdf_path, save_all=True, append_images=pages[1:])
+
+    tmp_dir = tmp_path / "work"
+    tmp_dir.mkdir()
+
+    class _FailingClient(_MockClient):
+        def post(self, *args, **kwargs):  # noqa: ARG002
+            raise httpx.HTTPError("backend down")
+
+    with (
+        patch("app.services.ocr_pipeline.httpx.Client", _FailingClient),
+        pytest.raises(RuntimeError, match="nicht erreichbar"),
+    ):
+        run_ocr(pdf_path, tmp_dir, max_parallel=2)
+
+
 def test_ocr_result_roundtrip() -> None:
     """``to_json_dict`` / ``from_json_dict`` is lossless."""
     original = OcrResult(

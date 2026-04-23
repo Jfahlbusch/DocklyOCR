@@ -377,8 +377,13 @@ def _install_worker_subprocess_shim(monkeypatch: pytest.MonkeyPatch, db_engine) 
     keep working. Any non-OCR-runner call on the shim is forwarded to the
     real ``subprocess.run`` as a safety net.
     """
-    # Stub out GPU auto-start — tests run without a real GPU backend
-    monkeypatch.setattr("app.workers.ocr_worker.ensure_gpu_running", lambda: None)
+    # Stub out GPU auto-start — tests run without a real GPU backend.
+    # Returns a dummy URL; the worker threads it into BACKEND_URL on the
+    # subprocess env but the runner is shimmed out below.
+    monkeypatch.setattr(
+        "app.workers.ocr_worker.ensure_any_gpu_running",
+        lambda: "http://test-backend:8000",
+    )
 
     real_run = subprocess.run
 

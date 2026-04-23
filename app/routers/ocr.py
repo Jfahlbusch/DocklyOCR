@@ -2,7 +2,7 @@
 
 The endpoint supports two execution modes:
 
-* ``mode=sync`` — runs the 13-strategy pipeline in-process and returns the
+* ``mode=sync`` — runs the 5-strategy pipeline in-process and returns the
   formatted result body directly with the appropriate ``Content-Type``.
 * ``mode=async`` (default) — enqueues an ARQ job and returns ``202 Accepted``
   with the job id + status polling URL. The caller is expected to poll
@@ -65,7 +65,7 @@ extracted text in the requested format.
 The endpoint supports two execution modes selected via the ``mode`` form
 field:
 
-* **``mode=sync``** — runs the 13-strategy pipeline in-process and returns
+* **``mode=sync``** — runs the 5-strategy pipeline in-process and returns
   the rendered result body directly with the format-appropriate
   ``Content-Type``. Best for small documents where you want to block on
   the result.
@@ -307,7 +307,17 @@ async def _run_sync(session: Session, job: Job, fmt_enum: OutputFormat) -> Respo
 
     result_path = storage.save_result(job.id, body, fmt_enum.value)
 
-    job.status = JobStatus.done
+    # Mirror worker behaviour: a run that finishes without crashing but where
+    # every page failed is not a success — the body would be empty and a
+    # caller polling the status would see ``done`` + nothing to use.
+    if result.page_count > 0 and result.pages_ok == 0:
+        job.status = JobStatus.failed
+        job.error_message = (
+            f"OCR fehlgeschlagen auf allen {result.page_count} Seiten "
+            "(Backend hat alle Requests abgelehnt)."
+        )
+    else:
+        job.status = JobStatus.done
     job.finished_at = datetime.utcnow()
     job.page_count = result.page_count
     job.pages_ok = result.pages_ok
@@ -316,6 +326,12 @@ async def _run_sync(session: Session, job: Job, fmt_enum: OutputFormat) -> Respo
     job.result_mime = mime
     session.add(job)
     session.commit()
+
+    if job.status == JobStatus.failed:
+        raise HTTPException(
+            status_code=502,
+            detail=job.error_message,
+        )
 
     filename = _result_filename(job.input_filename, fmt_enum.value)
     return Response(

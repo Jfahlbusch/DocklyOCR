@@ -60,11 +60,7 @@ _SMOKE_JPEG_B64 = (
 
 def _scw_configured() -> bool:
     """True iff Scaleway API credentials + at least one GPU are set."""
-    return bool(
-        settings.scw_access_key
-        and settings.scw_secret_key
-        and settings.gpu_candidates
-    )
+    return bool(settings.scw_access_key and settings.scw_secret_key and settings.gpu_candidates)
 
 
 def _backend_ready(backend_url: str) -> bool:

@@ -101,9 +101,7 @@ def test_ensure_any_falls_back_when_primary_out_of_stock(monkeypatch):
             "app.services.gpu_manager._scw_poweron",
             side_effect=["out_of_stock", "ok"],
         ) as mock_poweron,
-        patch(
-            "app.services.gpu_manager._verify_poweron_holds", return_value=True
-        ) as mock_verify,
+        patch("app.services.gpu_manager._verify_poweron_holds", return_value=True) as mock_verify,
         patch(
             "app.services.gpu_manager._wait_for_backend",
             return_value="http://fallback:8000",
@@ -158,20 +156,25 @@ def test_ensure_any_falls_back_when_primary_reverts_after_poweron(monkeypatch):
 def test_verify_poweron_holds_returns_false_on_archived_state(monkeypatch):
     _patch_settings(monkeypatch, scw_secret_key="secret")
     # Returns running first, then archived → should fail-fast
-    with patch(
-        "app.services.gpu_manager._scw_get_state",
-        side_effect=["starting", "starting", "archived"],
-    ), patch("app.services.gpu_manager.time.sleep"):
+    with (
+        patch(
+            "app.services.gpu_manager._scw_get_state",
+            side_effect=["starting", "starting", "archived"],
+        ),
+        patch("app.services.gpu_manager.time.sleep"),
+    ):
         assert gpu_manager._verify_poweron_holds("srv", "fr-par-2", hold_seconds=10) is False
 
 
 def test_verify_poweron_holds_returns_true_when_state_stays_up(monkeypatch):
     _patch_settings(monkeypatch, scw_secret_key="secret")
-    with patch(
-        "app.services.gpu_manager._scw_get_state", return_value="running"
-    ), patch("app.services.gpu_manager.time.sleep"), patch(
-        "app.services.gpu_manager.time.time",
-        side_effect=[0.0, 1.0, 2.0, 3.0, 4.0, 11.0],
+    with (
+        patch("app.services.gpu_manager._scw_get_state", return_value="running"),
+        patch("app.services.gpu_manager.time.sleep"),
+        patch(
+            "app.services.gpu_manager.time.time",
+            side_effect=[0.0, 1.0, 2.0, 3.0, 4.0, 11.0],
+        ),
     ):
         assert gpu_manager._verify_poweron_holds("srv", "fr-par-2", hold_seconds=10) is True
 

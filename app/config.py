@@ -55,9 +55,7 @@ class Settings(BaseSettings):
         """
         out: list[tuple[str, str, str, str]] = []
         if self.scw_gpu_server_id:
-            out.append(
-                ("primary", self.scw_gpu_server_id, self.scw_gpu_zone, self.backend_url)
-            )
+            out.append(("primary", self.scw_gpu_server_id, self.scw_gpu_zone, self.backend_url))
         if self.scw_gpu_server_id_fallback and self.backend_url_fallback:
             zone = self.scw_gpu_zone_fallback or self.scw_gpu_zone
             out.append(

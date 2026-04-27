@@ -635,10 +635,7 @@ def run_ocr(
             # successes, the backend is unreachable/broken. Abort before
             # firing more requests at it so the job surfaces a real error
             # instead of burning the full page budget.
-            if (
-                failed_so_far >= CIRCUIT_BREAKER_FAILED_THRESHOLD
-                and ok_so_far == 0
-            ):
+            if failed_so_far >= CIRCUIT_BREAKER_FAILED_THRESHOLD and ok_so_far == 0:
                 for f in future_to_idx:
                     f.cancel()
                 raise RuntimeError(

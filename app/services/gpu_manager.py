@@ -156,6 +156,51 @@ def _scw_poweroff(server_id: str, zone: str) -> None:
         logger.warning("Scaleway poweroff %s returned %s: %s", server_id[:8], status, body[:200])
 
 
+# Server states that indicate the box is *not* coming up. Scaleway sometimes
+# accepts a poweron with 200 ok and then silently flips the box back to
+# ``archived`` a few seconds later (capacity reshuffle, internal aborts).
+# Catching that early lets us fall through to the next candidate instead of
+# waiting the full boot-timeout window for vLLM that will never appear.
+_NOT_RUNNING_STATES = frozenset({"archived", "stopped", "stopped in place", "locked"})
+
+
+def _scw_get_state(server_id: str, zone: str) -> str:
+    """Fetch current state of a Scaleway instance. Returns ``"unknown"`` on error."""
+    url = f"{_SCW_API_BASE}/zones/{zone}/servers/{server_id}"
+    headers = {"X-Auth-Token": settings.scw_secret_key}
+    try:
+        r = httpx.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            return r.json().get("server", {}).get("state", "unknown")
+        logger.warning("Scaleway state fetch %s returned %s", server_id[:8], r.status_code)
+        return "unknown"
+    except httpx.HTTPError as e:
+        logger.warning("Scaleway state fetch %s failed: %s", server_id[:8], e)
+        return "unknown"
+
+
+def _verify_poweron_holds(server_id: str, zone: str, hold_seconds: int = 30) -> bool:
+    """Poll instance state for ``hold_seconds`` after a successful poweron.
+
+    Returns ``True`` iff the instance stays in a non-stopped state for the full
+    window. ``False`` as soon as it flips back to archived/stopped/locked —
+    that's our signal that Scaleway pulled the box silently and we should try
+    the fallback immediately instead of waiting for vLLM to come up.
+    """
+    deadline = time.time() + hold_seconds
+    while time.time() < deadline:
+        state = _scw_get_state(server_id, zone)
+        if state in _NOT_RUNNING_STATES:
+            logger.warning(
+                "Server %s reverted to '%s' after poweron — not a real boot",
+                server_id[:8],
+                state,
+            )
+            return False
+        time.sleep(2)
+    return True
+
+
 def ensure_any_gpu_running() -> str:
     """Block until *some* configured GPU can serve inference.
 
@@ -201,7 +246,11 @@ def ensure_any_gpu_running() -> str:
             logger.warning("GPU %s poweron errored — trying next candidate", label)
             last_error = f"{label} poweron error"
             continue
-        # "ok" — wait for this one to serve.
+        # "ok" — but verify the box doesn't get pulled back by Scaleway before
+        # committing to the 10-min boot wait.
+        if not _verify_poweron_holds(server_id, zone):
+            last_error = f"{label} poweron reverted"
+            continue
         try:
             return _wait_for_backend(backend_url)
         except RuntimeError as e:

@@ -74,7 +74,7 @@ def test_ensure_any_returns_primary_url_when_already_ready(monkeypatch):
         patch("app.services.gpu_manager._backend_serves_inference", return_value=True),
         patch("app.services.gpu_manager._scw_poweron") as mock_poweron,
     ):
-        assert gpu_manager.ensure_any_gpu_running() == "http://primary:8000"
+        assert gpu_manager.ensure_any_gpu_running() == ("http://primary:8000", "primary")
         mock_poweron.assert_not_called()
 
 
@@ -108,7 +108,7 @@ def test_ensure_any_falls_back_when_primary_out_of_stock(monkeypatch):
         ) as mock_wait,
     ):
         result = gpu_manager.ensure_any_gpu_running()
-        assert result == "http://fallback:8000"
+        assert result == ("http://fallback:8000", "fallback")
         # Primary attempted first, fallback second
         assert mock_poweron.call_count == 2
         mock_poweron.assert_any_call("srv-primary", "fr-par-2")
@@ -147,7 +147,7 @@ def test_ensure_any_falls_back_when_primary_reverts_after_poweron(monkeypatch):
         ) as mock_wait,
     ):
         result = gpu_manager.ensure_any_gpu_running()
-        assert result == "http://fallback:8000"
+        assert result == ("http://fallback:8000", "fallback")
         assert mock_verify.call_count == 2
         # _wait_for_backend NOT called for primary because verify said False
         mock_wait.assert_called_once_with("http://fallback:8000")
@@ -230,7 +230,7 @@ def test_ensure_any_tries_fallback_when_primary_boot_times_out(monkeypatch):
         ) as mock_wait,
     ):
         result = gpu_manager.ensure_any_gpu_running()
-        assert result == "http://fallback:8000"
+        assert result == ("http://fallback:8000", "fallback")
         assert mock_wait.call_count == 2
 
 
@@ -257,7 +257,7 @@ def test_gpu_candidates_primary_only(monkeypatch):
 
     cands = settings.gpu_candidates
     assert len(cands) == 1
-    assert cands[0] == ("primary", "srv-primary", "fr-par-2", "http://primary:8000")
+    assert cands[0] == ("primary", "srv-primary", "fr-par-2", "http://primary:8000", "primary")
 
 
 def test_gpu_candidates_primary_and_fallback(monkeypatch):
@@ -273,7 +273,7 @@ def test_gpu_candidates_primary_and_fallback(monkeypatch):
     cands = settings.gpu_candidates
     assert len(cands) == 2
     assert cands[0][0] == "primary"
-    assert cands[1] == ("fallback", "srv-fb", "fr-par-2", "http://fb:8000")
+    assert cands[1] == ("fallback", "srv-fb", "fr-par-2", "http://fb:8000", "fallback")
 
 
 def test_gpu_candidates_fallback_zone_override(monkeypatch):

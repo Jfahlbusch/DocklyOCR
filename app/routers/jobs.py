@@ -38,6 +38,8 @@ def _job_to_response(job: Job) -> JobDetailResponse:
         pages_ok=job.pages_ok,
         pages_failed=job.pages_failed,
         error_message=job.error_message,
+        backend_model=job.backend_model,
+        backend_instance=job.backend_instance,
         result_url=result_url,
         webhook_url=job.webhook_url,
         webhook_delivered=job.webhook_delivered,

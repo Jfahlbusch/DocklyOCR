@@ -98,6 +98,10 @@ class Job(SQLModel, table=True):
     result_mime: str | None = Field(default=None)
     webhook_delivered: bool = Field(default=False)
     webhook_attempts: int = Field(default=0)
+    # Recorded by the worker right before the pipeline runs so support and
+    # the admin UI can see *which* model + GPU served a given job.
+    backend_model: str | None = Field(default=None)
+    backend_instance: str | None = Field(default=None)
 
     customer: Customer | None = Relationship(back_populates="jobs")
 

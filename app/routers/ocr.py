@@ -281,6 +281,10 @@ async def _run_sync(session: Session, job: Job, fmt_enum: OutputFormat) -> Respo
 
     job.status = JobStatus.processing
     job.started_at = datetime.utcnow()
+    # Sync path runs in-process against ``settings.backend_url`` — there's no
+    # GPU-fallback dance here, so the served instance is always the primary.
+    job.backend_model = settings.backend_model
+    job.backend_instance = settings.scw_gpu_instance_label
     session.add(job)
     session.commit()
     session.refresh(job)

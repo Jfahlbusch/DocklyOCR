@@ -46,16 +46,34 @@ class Settings(BaseSettings):
     scw_gpu_zone_fallback: str = ""
     backend_url_fallback: str = ""
 
-    @property
-    def gpu_candidates(self) -> list[tuple[str, str, str, str]]:
-        """Ordered list of ``(label, server_id, zone, backend_url)`` for GPU selection.
+    # Human-readable labels stored on each Job so the admin UI can show
+    # which hardware served a given job. Defaults are the ``primary`` /
+    # ``fallback`` role names; setting these to e.g. ``H100-1-80G`` /
+    # ``L40S-1-48G`` makes the Job table self-explanatory.
+    scw_gpu_instance_label: str = "primary"
+    scw_gpu_instance_label_fallback: str = "fallback"
 
+    @property
+    def gpu_candidates(self) -> list[tuple[str, str, str, str, str]]:
+        """Ordered list of ``(label, server_id, zone, backend_url, instance_label)``
+        for GPU selection.
+
+        ``label`` is the role (primary/fallback). ``instance_label`` is the
+        human-readable hardware name persisted to ``Job.backend_instance``.
         Primary first, then fallback if configured. Entries without a
         server_id are skipped.
         """
-        out: list[tuple[str, str, str, str]] = []
+        out: list[tuple[str, str, str, str, str]] = []
         if self.scw_gpu_server_id:
-            out.append(("primary", self.scw_gpu_server_id, self.scw_gpu_zone, self.backend_url))
+            out.append(
+                (
+                    "primary",
+                    self.scw_gpu_server_id,
+                    self.scw_gpu_zone,
+                    self.backend_url,
+                    self.scw_gpu_instance_label,
+                )
+            )
         if self.scw_gpu_server_id_fallback and self.backend_url_fallback:
             zone = self.scw_gpu_zone_fallback or self.scw_gpu_zone
             out.append(
@@ -64,6 +82,7 @@ class Settings(BaseSettings):
                     self.scw_gpu_server_id_fallback,
                     zone,
                     self.backend_url_fallback,
+                    self.scw_gpu_instance_label_fallback,
                 )
             )
         return out

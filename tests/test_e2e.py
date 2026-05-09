@@ -382,7 +382,7 @@ def _install_worker_subprocess_shim(monkeypatch: pytest.MonkeyPatch, db_engine) 
     # subprocess env but the runner is shimmed out below.
     monkeypatch.setattr(
         "app.workers.ocr_worker.ensure_any_gpu_running",
-        lambda: "http://test-backend:8000",
+        lambda: ("http://test-backend:8000", "test-instance"),
     )
 
     real_run = subprocess.run

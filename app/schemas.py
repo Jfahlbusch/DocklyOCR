@@ -123,6 +123,16 @@ class JobDetailResponse(BaseModel):
         default=None,
         description="Populated when ``status`` is ``failed``.",
     )
+    backend_model: str | None = Field(
+        default=None,
+        examples=["qwen2.5-vl-7b"],
+        description="Vision-LLM model that served this job. ``null`` for jobs created before tracking was added.",
+    )
+    backend_instance: str | None = Field(
+        default=None,
+        examples=["H100-1-80G"],
+        description="Operator-friendly hardware label of the GPU that served this job.",
+    )
     result_url: str | None = Field(
         default=None,
         examples=["/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a/result"],

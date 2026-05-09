@@ -62,10 +62,11 @@ async def process_ocr_job(ctx, job_id: str) -> str:
             return "missing_input"
 
         # On-demand GPU: boot primary via Scaleway API, fall through to
-        # fallback on out_of_stock. Returns the active backend URL which
-        # the subprocess picks up via the ``BACKEND_URL`` env var.
+        # fallback on out_of_stock. Returns the active backend URL + the
+        # operator-friendly instance label (persisted to Job.backend_instance
+        # so the admin UI shows which hardware actually served the job).
         try:
-            backend_url = ensure_any_gpu_running()
+            backend_url, instance_label = ensure_any_gpu_running()
         except RuntimeError as e:
             with Session(engine) as s2:
                 j2 = s2.get(Job, job_id)
@@ -76,6 +77,13 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                     s2.add(j2)
                     s2.commit()
             return "gpu_boot_timeout"
+
+        # Record which model + instance is serving this job so support / the
+        # admin UI can see *what* ran, even after the GPU has been shut down.
+        job.backend_model = settings.backend_model
+        job.backend_instance = instance_label
+        session.add(job)
+        session.commit()
 
         try:
             with tempfile.TemporaryDirectory(prefix=f"ocr_{job_id}_") as tmp_dir_str:

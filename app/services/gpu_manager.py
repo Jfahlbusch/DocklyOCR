@@ -197,7 +197,7 @@ def _verify_poweron_holds(server_id: str, zone: str, hold_seconds: int = 30) -> 
     return True
 
 
-def ensure_any_gpu_running() -> str:
+def ensure_any_gpu_running() -> tuple[str, str]:
     """Block until *some* configured GPU can serve inference.
 
     Tries candidates in order (primary first). For each candidate:
@@ -209,29 +209,31 @@ def ensure_any_gpu_running() -> str:
     3. Poll readiness for up to ``_BOOT_TIMEOUT_SECONDS``. On success
        return the URL; on timeout move to the next candidate.
 
-    Returns the backend URL of the GPU that is ready. Raises
-    ``RuntimeError`` if no candidate becomes ready.
+    Returns ``(backend_url, instance_label)`` for the GPU that is ready.
+    ``instance_label`` is the operator-friendly hardware name (e.g.
+    ``H100-1-80G``) and gets persisted to ``Job.backend_instance``.
+    Raises ``RuntimeError`` if no candidate becomes ready.
     """
     candidates = settings.gpu_candidates
     if not candidates:
         # No Scaleway config — assume the operator runs the backend themselves.
         # Caller (worker) falls back to settings.backend_url.
         logger.warning("No GPU candidates configured — returning primary URL as-is")
-        return settings.backend_url
+        return settings.backend_url, settings.scw_gpu_instance_label
 
     # Fast path: any candidate already serving?
-    for label, _server_id, _zone, backend_url in candidates:
+    for label, _server_id, _zone, backend_url, instance_label in candidates:
         if _backend_ready(backend_url) and _backend_serves_inference(backend_url):
             logger.info("GPU %s already ready at %s", label, backend_url)
-            return backend_url
+            return backend_url, instance_label
 
     if not (settings.scw_access_key and settings.scw_secret_key):
         logger.warning("Scaleway credentials missing — will wait only on primary")
         # Fall through to the polling loop on the first candidate
-        return _wait_for_backend(candidates[0][3])
+        return _wait_for_backend(candidates[0][3]), candidates[0][4]
 
     last_error: str | None = None
-    for label, server_id, zone, backend_url in candidates:
+    for label, server_id, zone, backend_url, instance_label in candidates:
         logger.info("Trying GPU %s (%s)", label, server_id[:8])
         outcome = _scw_poweron(server_id, zone)
         if outcome == "out_of_stock":
@@ -248,7 +250,7 @@ def ensure_any_gpu_running() -> str:
             last_error = f"{label} poweron reverted"
             continue
         try:
-            return _wait_for_backend(backend_url)
+            return _wait_for_backend(backend_url), instance_label
         except RuntimeError as e:
             logger.warning("GPU %s did not become ready: %s", label, e)
             last_error = f"{label} boot timeout"
@@ -283,7 +285,7 @@ def ensure_gpu_running() -> None:
 
     Delegates to :func:`ensure_any_gpu_running` and discards the return value.
     New callers should use ``ensure_any_gpu_running()`` directly and pass the
-    URL to the pipeline.
+    URL + label to the pipeline / job record.
     """
     ensure_any_gpu_running()
 
@@ -308,6 +310,6 @@ async def shutdown_gpu_if_idle(redis_pool) -> None:
         return
 
     logger.info("No pending jobs — stopping all configured GPUs")
-    for label, server_id, zone, _ in settings.gpu_candidates:
+    for label, server_id, zone, _, _instance_label in settings.gpu_candidates:
         logger.info("Power off %s (%s)", label, server_id[:8])
         _scw_poweroff(server_id, zone)

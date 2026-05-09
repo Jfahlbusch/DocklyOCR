@@ -122,6 +122,8 @@ def _job_row_view(job: Job, customer_name: str) -> dict[str, Any]:
         "status": job.status.value if hasattr(job.status, "value") else str(job.status),
         "page_count": job.page_count,
         "created_at": job.created_at,
+        "backend_model": job.backend_model,
+        "backend_instance": job.backend_instance,
     }
 
 

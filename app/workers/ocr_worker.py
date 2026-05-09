@@ -22,11 +22,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from arq.connections import RedisSettings
+from arq.cron import cron
 from sqlmodel import Session
 
 from app.config import settings
 from app.db import engine
 from app.models import Job, JobStatus
+from app.services.cleanup import cleanup_old_jobs
 from app.services.formatters import format_output
 from app.services.gpu_manager import ensure_any_gpu_running
 from app.services.ocr_pipeline import OcrResult
@@ -212,6 +214,19 @@ async def _schedule_webhook_retry(ctx, job_id: str) -> None:
     )
 
 
+async def daily_cleanup(ctx) -> str:  # noqa: ARG001 -- ARQ injects ctx
+    """Cron entry point — purge OCR jobs and storage older than the TTL.
+
+    Runs every day at 03:00 UTC. Uses ``settings.result_ttl_days`` (set
+    to 7 by default; override via ``RESULT_TTL_DAYS`` env var).
+    """
+    report = cleanup_old_jobs(dry_run=False)
+    return (
+        f"deleted={report.deleted_count} freed_mb={report.deleted_bytes / 1024 / 1024:.1f} "
+        f"ttl_days={report.ttl_days}"
+    )
+
+
 class WorkerSettings:
     """ARQ worker configuration.
 
@@ -222,6 +237,10 @@ class WorkerSettings:
     """
 
     functions = [process_ocr_job, deliver_with_retry]
+    # Daily cleanup at 03:00 UTC (05:00 MESZ) — low-traffic window.
+    # ARQ ``unique=True`` (default) ensures only one worker runs it even
+    # if multiple workers are scaled up later.
+    cron_jobs = [cron(daily_cleanup, hour={3}, minute=0)]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 1
     # Slightly above the subprocess pipeline timeout so the TimeoutExpired

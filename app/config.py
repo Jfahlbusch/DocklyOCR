@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     allowed_origins: str = ""
     max_upload_mb: int = 100
-    result_ttl_days: int = 30
+    result_ttl_days: int = 7
 
     rate_limit_per_minute: int = 10
 

@@ -269,6 +269,30 @@ def test_get_result_returns_file(
     assert 'filename="doc.md"' in resp.headers["content-disposition"]
 
 
+def test_get_result_umlaut_filename_does_not_500(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    """Regression: macOS NFD filenames (ä = a + U+0308) used to crash the
+    result endpoint with UnicodeEncodeError on the Content-Disposition
+    header → HTTP 500 for every job whose name had an umlaut."""
+    api_key, customer = _seed_customer(session)
+    # NFD form — exactly what a macOS upload sends
+    nfd_name = "Versicherungsbestätigung.pdf"
+    job = _seed_job(session, customer, output_format=OutputFormat.md, filename=nfd_name)
+    _patch_storage.save_result(job.id, b"# Done", "md")
+
+    resp = client.get(f"/v1/jobs/{job.id}/result", headers={"X-API-Key": api_key})
+
+    assert resp.status_code == 200
+    assert resp.content == b"# Done"
+    cd = resp.headers["content-disposition"]
+    assert "attachment" in cd
+    # RFC 5987 UTF-8 form must be present for the non-ASCII name
+    assert "filename*=UTF-8''" in cd
+    # The header must at minimum be latin-1 constructible (no 500)
+    cd.encode("latin-1")
+
+
 def test_get_result_not_ready_returns_409(client: TestClient, session: Session) -> None:
     api_key, customer = _seed_customer(session)
     job = _seed_job(session, customer, status=JobStatus.pending)

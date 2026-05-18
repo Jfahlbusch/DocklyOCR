@@ -14,6 +14,7 @@ from sqlmodel import Session, func, select
 
 from app.auth import ApiKeyContext, require_api_key
 from app.db import get_session
+from app.http_utils import content_disposition_attachment
 from app.models import Job, JobStatus
 from app.schemas import ErrorResponse, JobDetailResponse, JobListResponse
 from app.services.storage import storage
@@ -245,9 +246,11 @@ async def get_job_result(
     filename = _result_filename(job.input_filename, ext)
     media_type = job.result_mime or "application/octet-stream"
 
+    # NOTE: do NOT pass filename=... to FileResponse and ALSO set a manual
+    # Content-Disposition — Starlette would emit its own header too. We set
+    # exactly one RFC 6266 header that survives non-latin-1 filenames.
     return FileResponse(
         path=str(result_path),
         media_type=media_type,
-        filename=filename,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition_attachment(filename)},
     )

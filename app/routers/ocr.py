@@ -22,6 +22,7 @@ from sqlmodel import Session
 from app.auth import ApiKeyContext, enforce_rate_limit
 from app.config import settings
 from app.db import get_session
+from app.http_utils import content_disposition_attachment
 from app.models import Job, JobStatus, OutputFormat
 from app.schemas import ErrorResponse, OcrAsyncResponse
 from app.services.formatters import format_output
@@ -342,7 +343,7 @@ async def _run_sync(session: Session, job: Job, fmt_enum: OutputFormat) -> Respo
         content=body,
         media_type=mime,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": content_disposition_attachment(filename),
             "X-Job-ID": job.id,
         },
     )

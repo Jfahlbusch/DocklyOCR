@@ -32,6 +32,7 @@ from app.services.cleanup import cleanup_old_jobs
 from app.services.document_router import select_engine
 from app.services.formatters import format_output
 from app.services.gpu_manager import ensure_any_gpu_running
+from app.services.html_preview import build_preview_from_markdown
 from app.services.ocr_pipeline import OcrResult
 from app.services.ocr_runner import EXIT_OPENDATALOADER_UNACCEPTABLE
 from app.services.storage import storage
@@ -218,6 +219,34 @@ async def process_ocr_job(ctx, job_id: str) -> str:
             job.backend_instance = instance_label
         session.add(job)
         session.commit()
+
+        # For non-opendataloader engines: opendataloader-pdf doesn't run,
+        # so there is no native HTML sidecar. Generate one from the
+        # Markdown rendering of the result so that GET /v1/jobs/{id}/preview
+        # works uniformly across engines (the DocklyProtect frontend can
+        # use the same URL regardless of which engine served the job).
+        if final_engine != "opendataloader":
+            try:
+                md_body, _md_mime = format_output(result, "md")
+                meta = {
+                    "Engine": final_engine,
+                    "Seiten": f"{result.pages_ok}/{result.page_count}",
+                }
+                if job.backend_model:
+                    meta["Modell"] = job.backend_model
+                preview_html = build_preview_from_markdown(
+                    md_body.decode("utf-8"),
+                    title=job.input_filename or "OCR Preview",
+                    meta=meta,
+                )
+                storage.save_preview(job_id, preview_html.encode("utf-8"))
+            except Exception as e:
+                # Preview is a nice-to-have — never let it fail the job
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "preview.html generation failed for %s: %s", job_id, e
+                )
 
         has_webhook = bool(job.webhook_url)
 

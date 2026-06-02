@@ -438,3 +438,26 @@ def test_get_result_missing_job_returns_404(client: TestClient, session: Session
     api_key, _customer = _seed_customer(session)
     resp = client.get("/v1/jobs/missing123/result", headers={"X-API-Key": api_key})
     assert resp.status_code == 404
+
+
+def test_preview_url_set_for_vllm_when_preview_generated(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    """vLLM-served jobs should expose preview_url when the worker has
+    written the Markdown→HTML preview to disk."""
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    job.engine = "vllm"
+    session.add(job)
+    session.commit()
+    _patch_storage.save_result(job.id, b"# md", "md")
+    # Simulate the worker writing the HTML preview
+    _patch_storage.save_preview(job.id, b"<!doctype html><html></html>")
+
+    resp = client.get(f"/v1/jobs/{job.id}", headers={"X-API-Key": api_key})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["preview_url"] == f"/v1/jobs/{job.id}/preview"
+    assert body["engine"] == "vllm"
+    assert body["structure_url"] is None  # still vllm-only constraint

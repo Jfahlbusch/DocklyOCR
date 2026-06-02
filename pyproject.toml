@@ -24,6 +24,7 @@ dependencies = [
     "itsdangerous>=2.1",
     "numpy>=1.24",
     "opendataloader-pdf>=2.4",
+    "markdown>=3.6",
 ]
 
 [project.optional-dependencies]

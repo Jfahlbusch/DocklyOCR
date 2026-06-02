@@ -29,12 +29,15 @@ def _job_to_response(job: Job) -> JobDetailResponse:
     preview_url: str | None = None
     if job.status == JobStatus.done:
         result_url = f"/v1/jobs/{job.id}/result"
-        # Only opendataloader produces structure + preview sidecars today.
-        if job.engine == "opendataloader":
-            if storage.get_structure_path(job.id) is not None:
-                structure_url = f"/v1/jobs/{job.id}/structure"
-            if storage.get_preview_path(job.id) is not None:
-                preview_url = f"/v1/jobs/{job.id}/preview"
+        # Structure JSON is opendataloader-only (vLLM has no bounding boxes).
+        if job.engine == "opendataloader" and storage.get_structure_path(job.id) is not None:
+            structure_url = f"/v1/jobs/{job.id}/structure"
+        # Preview HTML works for both engines: opendataloader writes its
+        # native HTML directly, vllm gets a Markdown→HTML rendering. We
+        # expose the URL whenever the file is actually on disk so the
+        # frontend can use it without engine-specific branching.
+        if storage.get_preview_path(job.id) is not None:
+            preview_url = f"/v1/jobs/{job.id}/preview"
     return JobDetailResponse(
         job_id=job.id,
         status=job.status,

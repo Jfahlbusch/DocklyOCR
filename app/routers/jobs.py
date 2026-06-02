@@ -26,11 +26,15 @@ def _job_to_response(job: Job) -> JobDetailResponse:
     """Map a ``Job`` ORM row onto the public ``JobDetailResponse`` schema."""
     result_url: str | None = None
     structure_url: str | None = None
+    preview_url: str | None = None
     if job.status == JobStatus.done:
         result_url = f"/v1/jobs/{job.id}/result"
-        # Only opendataloader produces a structure sidecar today.
-        if job.engine == "opendataloader" and storage.get_structure_path(job.id) is not None:
-            structure_url = f"/v1/jobs/{job.id}/structure"
+        # Only opendataloader produces structure + preview sidecars today.
+        if job.engine == "opendataloader":
+            if storage.get_structure_path(job.id) is not None:
+                structure_url = f"/v1/jobs/{job.id}/structure"
+            if storage.get_preview_path(job.id) is not None:
+                preview_url = f"/v1/jobs/{job.id}/preview"
     return JobDetailResponse(
         job_id=job.id,
         status=job.status,
@@ -48,6 +52,7 @@ def _job_to_response(job: Job) -> JobDetailResponse:
         engine=job.engine,
         result_url=result_url,
         structure_url=structure_url,
+        preview_url=preview_url,
         webhook_url=job.webhook_url,
         webhook_delivered=job.webhook_delivered,
         webhook_attempts=job.webhook_attempts,
@@ -315,4 +320,64 @@ async def get_job_structure(
         path=str(structure_path),
         media_type="application/json",
         headers={"Content-Disposition": content_disposition_attachment(f"{stem}.structure.json")},
+    )
+
+
+_GET_PREVIEW_DESCRIPTION = """
+Download the HTML preview rendering of a completed opendataloader job.
+
+The HTML keeps the visual structure of the original PDF together with
+inline bounding-box markers — useful for human inspection in a browser
+or for embedding in a viewer.
+
+Served with ``Content-Type: text/html`` so a browser renders it inline
+when the URL is opened directly.
+
+Returns ``404 Not Found`` for jobs served by the vLLM engine or if the
+preview was evicted by retention.
+"""
+
+
+@router.get(
+    "/jobs/{job_id}/preview",
+    summary="Download job HTML preview (opendataloader only)",
+    description=_GET_PREVIEW_DESCRIPTION,
+    response_model=None,
+    responses={
+        200: {
+            "description": "opendataloader HTML preview.",
+            "content": {"text/html": {}},
+        },
+        401: {"model": ErrorResponse, "description": "Missing or invalid ``X-API-Key`` header."},
+        404: {
+            "model": ErrorResponse,
+            "description": "No matching job, or no preview sidecar (vLLM-served jobs).",
+        },
+        409: {"model": ErrorResponse, "description": "Job is still processing."},
+    },
+)
+async def get_job_preview(
+    job_id: str,
+    ctx: ApiKeyContext = Depends(require_api_key),  # noqa: B008
+    session: Session = Depends(get_session),  # noqa: B008
+):
+    job = session.get(Job, job_id)
+    if job is None or job.customer_id != ctx.customer.id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != JobStatus.done:
+        raise HTTPException(status_code=409, detail="Result not ready")
+    preview_path = storage.get_preview_path(job_id)
+    if preview_path is None or not preview_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="HTML preview not available (only produced by the opendataloader engine)",
+        )
+    stem = Path(job.input_filename).stem or "preview"
+    # Inline disposition so opening the URL in a browser renders it.
+    return FileResponse(
+        path=str(preview_path),
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Disposition": f'inline; filename="{stem}.preview.html"',
+        },
     )

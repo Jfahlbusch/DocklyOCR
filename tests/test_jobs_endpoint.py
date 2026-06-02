@@ -291,6 +291,57 @@ def test_get_structure_returns_json_sidecar_for_opendataloader(
     assert jsonlib.loads(resp.content)["elements"][0]["type"] == "heading"
 
 
+def test_get_preview_returns_html_sidecar_for_opendataloader(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    """opendataloader-served jobs expose an HTML preview via /preview."""
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    job.engine = "opendataloader"
+    session.add(job)
+    session.commit()
+    _patch_storage.save_preview(job.id, b"<!doctype html><html><body>preview</body></html>")
+
+    resp = client.get(f"/v1/jobs/{job.id}/preview", headers={"X-API-Key": api_key})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    # inline disposition so a browser renders the preview directly
+    assert resp.headers["content-disposition"].startswith("inline")
+    assert b"preview" in resp.content
+
+
+def test_job_detail_response_exposes_preview_url(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    job.engine = "opendataloader"
+    session.add(job)
+    session.commit()
+    _patch_storage.save_result(job.id, b"# md", "md")
+    _patch_storage.save_preview(job.id, b"<html></html>")
+
+    resp = client.get(f"/v1/jobs/{job.id}", headers={"X-API-Key": api_key})
+
+    body = resp.json()
+    assert body["preview_url"] == f"/v1/jobs/{job.id}/preview"
+
+
+def test_get_preview_404_when_no_sidecar(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    job.engine = "vllm"
+    session.add(job)
+    session.commit()
+    _patch_storage.save_result(job.id, b"# md", "md")
+
+    resp = client.get(f"/v1/jobs/{job.id}/preview", headers={"X-API-Key": api_key})
+    assert resp.status_code == 404
+
+
 def test_get_structure_404_when_no_sidecar(
     client: TestClient, session: Session, _patch_storage: LocalStorage
 ) -> None:

@@ -93,6 +93,7 @@ def run_opendataloader(
     output_path: Path | None = None,
     pages_dir: Path | None = None,  # noqa: ARG001 -- ODL writes its own pages dir, ignored
     structure_path: Path | None = None,
+    html_path: Path | None = None,
     sanitize: bool = False,
 ) -> OcrResult:
     """Run opendataloader-pdf against a digital PDF.
@@ -119,10 +120,16 @@ def run_opendataloader(
     from opendataloader_pdf import convert
 
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    # Always emit markdown; emit JSON too when we'll persist it as the
-    # structure sidecar. JSON has a meaningful disk cost (~2-3x of MD on
-    # AVB-style docs) so we only generate it when actually needed.
-    fmt = "markdown,json" if structure_path is not None else "markdown"
+    # Build the format list lazily — opendataloader's wall time grows
+    # roughly linearly per emitted format. Markdown is always written
+    # (it's the primary output); JSON and HTML only when the caller
+    # asked for the matching sidecar.
+    formats = ["markdown"]
+    if structure_path is not None:
+        formats.append("json")
+    if html_path is not None:
+        formats.append("html")
+    fmt = ",".join(formats)
     t0 = time.time()
     convert(
         str(input_path),
@@ -162,6 +169,22 @@ def run_opendataloader(
         else:
             logger.warning(
                 "opendataloader did not produce JSON in %s — skipping structure sidecar",
+                tmp_dir,
+            )
+
+    # Same dance for the HTML preview sidecar.
+    if html_path is not None:
+        html_file = tmp_dir / f"{input_path.stem}.html"
+        if not html_file.exists():
+            html_candidates = list(tmp_dir.glob("*.html"))
+            if html_candidates:
+                html_file = html_candidates[0]
+        if html_file.exists():
+            html_path.parent.mkdir(parents=True, exist_ok=True)
+            html_path.write_bytes(html_file.read_bytes())
+        else:
+            logger.warning(
+                "opendataloader did not produce HTML in %s — skipping preview sidecar",
                 tmp_dir,
             )
 

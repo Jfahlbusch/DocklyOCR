@@ -78,9 +78,10 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                 result_output_path = storage.base_dir / job_id / f"result.{job.output_format.value}"
                 pages_dir = storage.base_dir / job_id / "pages"
 
-                # Structure-JSON sidecar lives alongside result.md in storage
-                # and is only emitted by the opendataloader engine.
+                # Sidecars live alongside result.md in storage. They are
+                # only emitted by the opendataloader engine.
                 structure_path = storage.base_dir / job_id / "structure.json"
+                html_path = storage.base_dir / job_id / "preview.html"
 
                 def _run_subprocess(engine: str, backend_url: str | None) -> int:
                     cmd = [
@@ -103,7 +104,12 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                         engine,
                     ]
                     if engine == "opendataloader":
-                        cmd += ["--structure-path", str(structure_path)]
+                        cmd += [
+                            "--structure-path",
+                            str(structure_path),
+                            "--html-path",
+                            str(html_path),
+                        ]
                         if job.sanitize:
                             cmd += ["--sanitize"]
                     env = {**os.environ}

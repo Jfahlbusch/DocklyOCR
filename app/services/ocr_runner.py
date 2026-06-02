@@ -51,6 +51,12 @@ def main() -> int:
         help="Write the opendataloader JSON structure sidecar to this path (opendataloader only).",
     )
     parser.add_argument(
+        "--html-path",
+        type=Path,
+        default=None,
+        help="Write the opendataloader HTML preview sidecar to this path (opendataloader only).",
+    )
+    parser.add_argument(
         "--sanitize",
         action="store_true",
         help="When using opendataloader, replace emails/phones/IPs/etc. with placeholders.",
@@ -83,6 +89,7 @@ def main() -> int:
             output_path=args.output_path,
             pages_dir=args.pages_dir,
             structure_path=args.structure_path,
+            html_path=args.html_path,
             sanitize=args.sanitize,
         )
         if not is_result_acceptable(result):

@@ -102,6 +102,12 @@ class Job(SQLModel, table=True):
     # the admin UI can see *which* model + GPU served a given job.
     backend_model: str | None = Field(default=None)
     backend_instance: str | None = Field(default=None)
+    # Which OCR engine produced this result:
+    #   ``opendataloader``                   — CPU-only PDF parser
+    #   ``vllm``                             — vision-LLM pipeline
+    #   ``vllm-fallback-after-opendataloader`` — opendataloader output was
+    #                                          rejected by the heuristic
+    engine: str | None = Field(default=None)
 
     customer: Customer | None = Relationship(back_populates="jobs")
 

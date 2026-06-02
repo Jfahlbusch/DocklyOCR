@@ -384,6 +384,12 @@ def _install_worker_subprocess_shim(monkeypatch: pytest.MonkeyPatch, db_engine) 
         "app.workers.ocr_worker.ensure_any_gpu_running",
         lambda: ("http://test-backend:8000", "test-instance"),
     )
+    # Force the legacy vllm engine for the e2e flow — the per-engine
+    # routing is exercised in test_document_router.py.
+    monkeypatch.setattr(
+        "app.workers.ocr_worker.select_engine",
+        lambda _input_path: "vllm",
+    )
 
     real_run = subprocess.run
 

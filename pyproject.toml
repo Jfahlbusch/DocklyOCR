@@ -23,6 +23,7 @@ dependencies = [
     "python-json-logger>=2.0",
     "itsdangerous>=2.1",
     "numpy>=1.24",
+    "opendataloader-pdf>=2.4",
 ]
 
 [project.optional-dependencies]

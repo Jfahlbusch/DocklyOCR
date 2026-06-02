@@ -124,6 +124,7 @@ def _job_row_view(job: Job, customer_name: str) -> dict[str, Any]:
         "created_at": job.created_at,
         "backend_model": job.backend_model,
         "backend_instance": job.backend_instance,
+        "engine": job.engine,
     }
 
 

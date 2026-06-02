@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     curl \
     ca-certificates \
+    openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

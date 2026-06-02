@@ -29,9 +29,11 @@ from app.config import settings
 from app.db import engine
 from app.models import Job, JobStatus
 from app.services.cleanup import cleanup_old_jobs
+from app.services.document_router import select_engine
 from app.services.formatters import format_output
 from app.services.gpu_manager import ensure_any_gpu_running
 from app.services.ocr_pipeline import OcrResult
+from app.services.ocr_runner import EXIT_OPENDATALOADER_UNACCEPTABLE
 from app.services.storage import storage
 from app.services.webhook import MAX_ATTEMPTS, RETRY_DELAYS_S, deliver_webhook, deliver_with_retry
 
@@ -63,29 +65,10 @@ async def process_ocr_job(ctx, job_id: str) -> str:
             session.commit()
             return "missing_input"
 
-        # On-demand GPU: boot primary via Scaleway API, fall through to
-        # fallback on out_of_stock. Returns the active backend URL + the
-        # operator-friendly instance label (persisted to Job.backend_instance
-        # so the admin UI shows which hardware actually served the job).
-        try:
-            backend_url, instance_label = ensure_any_gpu_running()
-        except RuntimeError as e:
-            with Session(engine) as s2:
-                j2 = s2.get(Job, job_id)
-                if j2 is not None:
-                    j2.status = JobStatus.failed
-                    j2.error_message = f"GPU boot failed: {e}"
-                    j2.finished_at = datetime.utcnow()
-                    s2.add(j2)
-                    s2.commit()
-            return "gpu_boot_timeout"
-
-        # Record which model + instance is serving this job so support / the
-        # admin UI can see *what* ran, even after the GPU has been shut down.
-        job.backend_model = settings.backend_model
-        job.backend_instance = instance_label
-        session.add(job)
-        session.commit()
+        # Pick the cheap engine first: digital PDFs go to opendataloader
+        # on CPU (no GPU spin-up). Images and scanned PDFs go straight
+        # to the vLLM pipeline.
+        planned_engine = select_engine(input_path)
 
         try:
             with tempfile.TemporaryDirectory(prefix=f"ocr_{job_id}_") as tmp_dir_str:
@@ -94,8 +77,9 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                 # Write incremental output + page images to STORAGE (persistent, visible)
                 result_output_path = storage.base_dir / job_id / f"result.{job.output_format.value}"
                 pages_dir = storage.base_dir / job_id / "pages"
-                subprocess.run(
-                    [
+
+                def _run_subprocess(engine: str, backend_url: str | None) -> int:
+                    cmd = [
                         sys.executable,
                         "-m",
                         "app.services.ocr_runner",
@@ -111,11 +95,54 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                         job.output_format.value,
                         "--pages-dir",
                         str(pages_dir),
-                    ],
-                    check=True,
-                    timeout=_PIPELINE_TIMEOUT_S,
-                    env={**os.environ, "BACKEND_URL": backend_url},
-                )
+                        "--engine",
+                        engine,
+                    ]
+                    env = {**os.environ}
+                    if backend_url is not None:
+                        env["BACKEND_URL"] = backend_url
+                    proc = subprocess.run(cmd, check=False, timeout=_PIPELINE_TIMEOUT_S, env=env)
+                    return proc.returncode
+
+                final_engine = planned_engine
+                backend_url: str | None = None
+                instance_label: str | None = None
+
+                if planned_engine == "opendataloader":
+                    # CPU-only — no GPU touch.
+                    rc = _run_subprocess("opendataloader", backend_url=None)
+                    if rc == EXIT_OPENDATALOADER_UNACCEPTABLE:
+                        # The text-layer probe said yes, but the actual
+                        # extraction was too sparse → fall back to vllm.
+                        try:
+                            backend_url, instance_label = ensure_any_gpu_running()
+                        except RuntimeError as e:
+                            job.status = JobStatus.failed
+                            job.error_message = (
+                                f"GPU boot failed (after opendataloader fallback): {e}"
+                            )
+                            job.finished_at = datetime.utcnow()
+                            session.add(job)
+                            session.commit()
+                            return "gpu_boot_timeout"
+                        rc = _run_subprocess("vllm", backend_url=backend_url)
+                        final_engine = "vllm-fallback-after-opendataloader"
+                    if rc != 0:
+                        raise subprocess.CalledProcessError(rc, "ocr_runner")
+                else:  # vllm path: needs the GPU upfront
+                    try:
+                        backend_url, instance_label = ensure_any_gpu_running()
+                    except RuntimeError as e:
+                        job.status = JobStatus.failed
+                        job.error_message = f"GPU boot failed: {e}"
+                        job.finished_at = datetime.utcnow()
+                        session.add(job)
+                        session.commit()
+                        return "gpu_boot_timeout"
+                    rc = _run_subprocess("vllm", backend_url=backend_url)
+                    if rc != 0:
+                        raise subprocess.CalledProcessError(rc, "ocr_runner")
+
                 result_data = json.loads(result_json_path.read_text())
                 result = OcrResult.from_json_dict(result_data)
         except subprocess.CalledProcessError as e:
@@ -169,6 +196,12 @@ async def process_ocr_job(ctx, job_id: str) -> str:
         job.pages_failed = result.pages_failed
         job.result_path = str(result_path)
         job.result_mime = mime
+        # Record which engine actually produced the result. backend_model
+        # and backend_instance are only meaningful when the vision-LLM ran.
+        job.engine = final_engine
+        if final_engine in ("vllm", "vllm-fallback-after-opendataloader"):
+            job.backend_model = settings.backend_model
+            job.backend_instance = instance_label
         session.add(job)
         session.commit()
 

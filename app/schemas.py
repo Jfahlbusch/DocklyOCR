@@ -133,6 +133,11 @@ class JobDetailResponse(BaseModel):
         examples=["H100-1-80G"],
         description="Operator-friendly hardware label of the GPU that served this job.",
     )
+    engine: str | None = Field(
+        default=None,
+        examples=["opendataloader", "vllm", "vllm-fallback-after-opendataloader"],
+        description="OCR engine that produced the result. ``opendataloader`` runs CPU-only on digital PDFs; ``vllm`` is the vision-LLM pipeline used for images and scans.",
+    )
     result_url: str | None = Field(
         default=None,
         examples=["/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a/result"],

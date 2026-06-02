@@ -21,10 +21,15 @@
       <td class="px-5 py-3">{% include "admin/_status_dot.html" %}<span class="text-slate-700">{{ job.status }}</span></td>
       <td class="px-5 py-3 text-slate-600 tnum">{{ job.page_count if job.page_count is not none else "—" }}</td>
       <td class="px-5 py-3 text-xs text-slate-600 whitespace-nowrap">
-        {% if job.backend_model or job.backend_instance %}
+        {% if job.engine == "opendataloader" %}
+          <span class="font-mono">opendataloader</span>
+        {% elif job.backend_model or job.backend_instance %}
           <span class="font-mono">{{ job.backend_model or "—" }}</span>
           <span class="text-slate-400"> · </span>
           <span>{{ job.backend_instance or "—" }}</span>
+          {% if job.engine and "fallback" in job.engine %}
+            <span class="text-rose-600 text-[10px] ml-1">(fallback)</span>
+          {% endif %}
         {% else %}
           <span class="text-slate-400">—</span>
         {% endif %}

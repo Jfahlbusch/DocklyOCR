@@ -44,6 +44,17 @@ def main() -> int:
         choices=["auto", "opendataloader", "vllm"],
         default="auto",
     )
+    parser.add_argument(
+        "--structure-path",
+        type=Path,
+        default=None,
+        help="Write the opendataloader JSON structure sidecar to this path (opendataloader only).",
+    )
+    parser.add_argument(
+        "--sanitize",
+        action="store_true",
+        help="When using opendataloader, replace emails/phones/IPs/etc. with placeholders.",
+    )
     args = parser.parse_args()
 
     args.tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +82,8 @@ def main() -> int:
             args.tmp_dir,
             output_path=args.output_path,
             pages_dir=args.pages_dir,
+            structure_path=args.structure_path,
+            sanitize=args.sanitize,
         )
         if not is_result_acceptable(result):
             # Signal the worker that a vllm fallback is needed. We do

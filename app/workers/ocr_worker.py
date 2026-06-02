@@ -78,6 +78,10 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                 result_output_path = storage.base_dir / job_id / f"result.{job.output_format.value}"
                 pages_dir = storage.base_dir / job_id / "pages"
 
+                # Structure-JSON sidecar lives alongside result.md in storage
+                # and is only emitted by the opendataloader engine.
+                structure_path = storage.base_dir / job_id / "structure.json"
+
                 def _run_subprocess(engine: str, backend_url: str | None) -> int:
                     cmd = [
                         sys.executable,
@@ -98,6 +102,10 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                         "--engine",
                         engine,
                     ]
+                    if engine == "opendataloader":
+                        cmd += ["--structure-path", str(structure_path)]
+                        if job.sanitize:
+                            cmd += ["--sanitize"]
                     env = {**os.environ}
                     if backend_url is not None:
                         env["BACKEND_URL"] = backend_url
@@ -263,10 +271,18 @@ async def daily_cleanup(ctx) -> str:  # noqa: ARG001 -- ARQ injects ctx
 class WorkerSettings:
     """ARQ worker configuration.
 
-    ``max_jobs = 1``: Jobs are processed strictly sequentially. Within each
-    job, the pipeline fires MAX_PARALLEL_PAGES (12) concurrent requests to
-    vLLM — saturating the H100. Running multiple jobs in parallel would
-    create contention on the GPU and slow everything down.
+    ``max_jobs = 2``: With the engine router (opendataloader on CPU vs.
+    vLLM on GPU) the two engines no longer share a critical resource, so
+    we can run two jobs concurrently. Realistic mixes:
+
+    * 1 × opendataloader + 1 × vLLM — no contention; the opendataloader
+      worker process is CPU-bound while the vLLM worker is mostly
+      waiting on HTTP responses from the remote GPU.
+    * 2 × opendataloader — both on CPU; fits 3 vCPUs comfortably.
+    * 2 × vLLM — queue inside vLLM; not faster than serial but harmless.
+
+    Within each vLLM job the pipeline still fires MAX_PARALLEL_PAGES (12)
+    page requests, so the GPU is well-utilised even at max_jobs=2.
     """
 
     functions = [process_ocr_job, deliver_with_retry]
@@ -275,7 +291,7 @@ class WorkerSettings:
     # if multiple workers are scaled up later.
     cron_jobs = [cron(daily_cleanup, hour={3}, minute=0)]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
-    max_jobs = 1
+    max_jobs = 2
     # Slightly above the subprocess pipeline timeout so the TimeoutExpired
     # branch above runs cleanly before ARQ gives up.
     job_timeout = _PIPELINE_TIMEOUT_S + 300

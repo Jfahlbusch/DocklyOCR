@@ -66,6 +66,27 @@ class LocalStorage:
                 return p
         return None
 
+    def save_structure(self, job_id: str, body: bytes) -> Path:
+        """Store the opendataloader structured JSON sidecar.
+
+        The structure file carries per-element bounding boxes, page
+        numbers, heading levels, and tables — everything that the plain
+        markdown body throws away. Only present for ``engine=opendataloader``
+        jobs.
+        """
+        job_dir = self.base_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        path = job_dir / "structure.json"
+        path.write_bytes(body)
+        return path
+
+    def get_structure_path(self, job_id: str) -> Path | None:
+        job_dir = self.base_dir / job_id
+        if not job_dir.exists():
+            return None
+        p = job_dir / "structure.json"
+        return p if p.exists() else None
+
     def delete_job(self, job_id: str) -> None:
         job_dir = self.base_dir / job_id
         if job_dir.exists():

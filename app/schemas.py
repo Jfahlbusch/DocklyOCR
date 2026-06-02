@@ -138,6 +138,11 @@ class JobDetailResponse(BaseModel):
         examples=["opendataloader", "vllm", "vllm-fallback-after-opendataloader"],
         description="OCR engine that produced the result. ``opendataloader`` runs CPU-only on digital PDFs; ``vllm`` is the vision-LLM pipeline used for images and scans.",
     )
+    structure_url: str | None = Field(
+        default=None,
+        examples=["/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a/structure"],
+        description="Relative URL for the opendataloader JSON sidecar with per-element bounding boxes, page numbers and heading levels. ``null`` for jobs served by the vLLM engine.",
+    )
     result_url: str | None = Field(
         default=None,
         examples=["/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a/result"],

@@ -25,8 +25,12 @@ router = APIRouter(tags=["jobs"])
 def _job_to_response(job: Job) -> JobDetailResponse:
     """Map a ``Job`` ORM row onto the public ``JobDetailResponse`` schema."""
     result_url: str | None = None
+    structure_url: str | None = None
     if job.status == JobStatus.done:
         result_url = f"/v1/jobs/{job.id}/result"
+        # Only opendataloader produces a structure sidecar today.
+        if job.engine == "opendataloader" and storage.get_structure_path(job.id) is not None:
+            structure_url = f"/v1/jobs/{job.id}/structure"
     return JobDetailResponse(
         job_id=job.id,
         status=job.status,
@@ -43,6 +47,7 @@ def _job_to_response(job: Job) -> JobDetailResponse:
         backend_instance=job.backend_instance,
         engine=job.engine,
         result_url=result_url,
+        structure_url=structure_url,
         webhook_url=job.webhook_url,
         webhook_delivered=job.webhook_delivered,
         webhook_attempts=job.webhook_attempts,
@@ -254,4 +259,60 @@ async def get_job_result(
         path=str(result_path),
         media_type=media_type,
         headers={"Content-Disposition": content_disposition_attachment(filename)},
+    )
+
+
+_GET_STRUCTURE_DESCRIPTION = """
+Download the structured JSON sidecar for a completed opendataloader job.
+
+The sidecar contains one entry per text block with: ``type``
+(heading/paragraph/list/list item/table), ``page number``, ``bounding box``
+([x1, y1, x2, y2] in PDF user-space coordinates), ``heading level``,
+``font``, ``font size`` and the verbatim ``content``.
+
+Returns ``404 Not Found`` for jobs served by the vLLM engine (no
+structure information is produced there) or if the sidecar was evicted
+by retention.
+"""
+
+
+@router.get(
+    "/jobs/{job_id}/structure",
+    summary="Download job structure sidecar (opendataloader only)",
+    description=_GET_STRUCTURE_DESCRIPTION,
+    response_model=None,
+    responses={
+        200: {
+            "description": "opendataloader JSON structure with per-element bounding boxes.",
+            "content": {"application/json": {}},
+        },
+        401: {"model": ErrorResponse, "description": "Missing or invalid ``X-API-Key`` header."},
+        404: {
+            "model": ErrorResponse,
+            "description": "No matching job, or job has no structure sidecar (vLLM-served jobs).",
+        },
+        409: {"model": ErrorResponse, "description": "Job is still processing."},
+    },
+)
+async def get_job_structure(
+    job_id: str,
+    ctx: ApiKeyContext = Depends(require_api_key),  # noqa: B008
+    session: Session = Depends(get_session),  # noqa: B008
+):
+    job = session.get(Job, job_id)
+    if job is None or job.customer_id != ctx.customer.id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != JobStatus.done:
+        raise HTTPException(status_code=409, detail="Result not ready")
+    structure_path = storage.get_structure_path(job_id)
+    if structure_path is None or not structure_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Structure sidecar not available (only produced by the opendataloader engine)",
+        )
+    stem = Path(job.input_filename).stem or "structure"
+    return FileResponse(
+        path=str(structure_path),
+        media_type="application/json",
+        headers={"Content-Disposition": content_disposition_attachment(f"{stem}.structure.json")},
     )

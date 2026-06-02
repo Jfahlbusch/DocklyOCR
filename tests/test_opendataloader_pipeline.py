@@ -104,3 +104,38 @@ def test_run_opendataloader_raises_when_no_output(tmp_path: Path) -> None:
             assert "no markdown output" in str(e).lower()
         else:
             raise AssertionError("expected RuntimeError")
+
+
+# ── BBox-Anchor injection ────────────────────────────────────────────────
+
+
+def test_inject_bbox_anchors_prepends_anchors_for_known_blocks(tmp_path: Path) -> None:
+    from app.services.opendataloader_pipeline import _inject_bbox_anchors
+
+    structure = {
+        "kids": [
+            {
+                "type": "heading",
+                "page number": 1,
+                "bounding box": [88.0, 553.0, 295.7, 568.4],
+                "content": "Wohnungseigentumsgesetz (WEG)",
+            },
+            {
+                "type": "paragraph",
+                "page number": 1,
+                "bounding box": [68.1, 749.0, 207.2, 762.3],
+                "content": "Vertragsbestandteil AZ120.8",
+            },
+        ]
+    }
+    structure_path = tmp_path / "structure.json"
+    structure_path.write_text(__import__("json").dumps(structure))
+
+    md = "# Wohnungseigentumsgesetz (WEG)\n\nVertragsbestandteil AZ120.8\n"
+    out = _inject_bbox_anchors(md, structure_path)
+
+    assert 'id="odl-p1-bbox-88.0-553.0-295.7-568.4"' in out
+    assert 'id="odl-p1-bbox-68.1-749.0-207.2-762.3"' in out
+    # Original markdown must still be intact (anchors are prepended)
+    assert "# Wohnungseigentumsgesetz (WEG)" in out
+    assert "Vertragsbestandteil AZ120.8" in out

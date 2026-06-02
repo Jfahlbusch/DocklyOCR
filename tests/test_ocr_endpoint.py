@@ -321,3 +321,39 @@ def test_async_mode_webhook_url_persisted(
     assert job is not None
     assert job.webhook_url == "https://my-app.com/hook"
     assert job.status == JobStatus.pending
+
+
+def test_async_persists_sanitize_flag(client: TestClient, api_key: str, session: Session) -> None:
+    """When the caller asks for sanitize=true the job row records it so
+    the worker can pass it through to opendataloader at execution time."""
+    resp = client.post(
+        "/v1/ocr",
+        headers={"X-API-Key": api_key},
+        files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4\n"), "application/pdf")},
+        data={"output_format": "md", "mode": "async", "sanitize": "true"},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    session.expire_all()
+    job = session.get(Job, job_id)
+    assert job is not None
+    assert job.sanitize is True
+
+
+def test_async_sanitize_defaults_to_false(
+    client: TestClient, api_key: str, session: Session
+) -> None:
+    resp = client.post(
+        "/v1/ocr",
+        headers={"X-API-Key": api_key},
+        files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4\n"), "application/pdf")},
+        data={"output_format": "md", "mode": "async"},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    session.expire_all()
+    job = session.get(Job, job_id)
+    assert job is not None
+    assert job.sanitize is False

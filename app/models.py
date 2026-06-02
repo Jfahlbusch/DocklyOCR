@@ -108,6 +108,9 @@ class Job(SQLModel, table=True):
     #   ``vllm-fallback-after-opendataloader`` — opendataloader output was
     #                                          rejected by the heuristic
     engine: str | None = Field(default=None)
+    # Caller asked for DSGVO-style pseudonymisation. Only honoured by the
+    # opendataloader engine (vllm doesn't expose a sanitize switch).
+    sanitize: bool = Field(default=False)
 
     customer: Customer | None = Relationship(back_populates="jobs")
 

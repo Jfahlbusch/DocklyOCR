@@ -269,6 +269,66 @@ def test_get_result_returns_file(
     assert 'filename="doc.md"' in resp.headers["content-disposition"]
 
 
+def test_get_structure_returns_json_sidecar_for_opendataloader(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    """opendataloader-served jobs expose a JSON sidecar via /structure."""
+    import json as jsonlib
+
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    # Mark this as opendataloader-served and drop a structure file
+    job.engine = "opendataloader"
+    session.add(job)
+    session.commit()
+    sidecar = {"elements": [{"type": "heading", "page number": 1, "bounding box": [1, 2, 3, 4]}]}
+    _patch_storage.save_structure(job.id, jsonlib.dumps(sidecar).encode("utf-8"))
+
+    resp = client.get(f"/v1/jobs/{job.id}/structure", headers={"X-API-Key": api_key})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert jsonlib.loads(resp.content)["elements"][0]["type"] == "heading"
+
+
+def test_get_structure_404_when_no_sidecar(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    """vLLM-served jobs (or any without a sidecar) return 404."""
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    job.engine = "vllm"
+    session.add(job)
+    session.commit()
+    _patch_storage.save_result(job.id, b"# md", "md")
+
+    resp = client.get(f"/v1/jobs/{job.id}/structure", headers={"X-API-Key": api_key})
+
+    assert resp.status_code == 404
+    assert "structure" in resp.json()["detail"].lower()
+
+
+def test_job_detail_response_exposes_structure_url_when_present(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    import json as jsonlib
+
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    job.engine = "opendataloader"
+    session.add(job)
+    session.commit()
+    _patch_storage.save_result(job.id, b"# md", "md")
+    _patch_storage.save_structure(job.id, jsonlib.dumps({"elements": []}).encode("utf-8"))
+
+    resp = client.get(f"/v1/jobs/{job.id}", headers={"X-API-Key": api_key})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["structure_url"] == f"/v1/jobs/{job.id}/structure"
+    assert body["engine"] == "opendataloader"
+
+
 def test_get_result_umlaut_filename_does_not_500(
     client: TestClient, session: Session, _patch_storage: LocalStorage
 ) -> None:

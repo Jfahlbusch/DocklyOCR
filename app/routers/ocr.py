@@ -198,6 +198,7 @@ async def submit_ocr(
     output_format: str = Form(...),
     mode: Literal["sync", "async"] = Form("async"),
     webhook_url: str | None = Form(None),
+    sanitize: bool = Form(False),
     ctx: ApiKeyContext = Depends(enforce_rate_limit),  # noqa: B008 -- FastAPI dep pattern
     session: Session = Depends(get_session),  # noqa: B008 -- FastAPI dep pattern
 ):
@@ -248,6 +249,7 @@ async def submit_ocr(
         input_mime=mime,
         output_format=fmt_enum,
         webhook_url=webhook_url,
+        sanitize=sanitize,
     )
     session.add(job)
     session.commit()
@@ -418,6 +420,7 @@ async def submit_ocr_batch(
     files: list[UploadFile] = File(...),  # noqa: B008
     output_format: str = Form(...),
     webhook_url: str | None = Form(None),
+    sanitize: bool = Form(False),
     ctx: ApiKeyContext = Depends(enforce_rate_limit),  # noqa: B008
     session: Session = Depends(get_session),  # noqa: B008
 ):
@@ -486,6 +489,7 @@ async def submit_ocr_batch(
             input_mime=mime,
             output_format=fmt_enum,
             webhook_url=webhook_url,
+            sanitize=sanitize,
         )
         session.add(job)
         session.commit()

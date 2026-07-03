@@ -30,6 +30,7 @@ from app.db import engine
 from app.models import Job, JobStatus
 from app.services.cleanup import cleanup_old_jobs
 from app.services.document_router import select_engine
+from app.services.entity_extractor import extract_entities
 from app.services.formatters import format_output
 from app.services.gpu_manager import ensure_any_gpu_running
 from app.services.html_preview import build_preview_from_markdown
@@ -247,6 +248,28 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                 logging.getLogger(__name__).warning(
                     "preview.html generation failed for %s: %s", job_id, e
                 )
+
+        # Extract typed values (amounts, percentages, dates, policy
+        # numbers) into the entities.json sidecar. Runs for every engine;
+        # bounding boxes are attached when the opendataloader structure
+        # sidecar exists. See docs/WERTERKENNUNG.md for the pattern
+        # catalogue. Never fails the job.
+        try:
+            entities = extract_entities(
+                result,
+                structure_path=storage.get_structure_path(job_id),
+            )
+            entities["meta"]["engine"] = final_engine
+            storage.save_entities(
+                job_id,
+                json.dumps(entities, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "entities.json generation failed for %s: %s", job_id, e
+            )
 
         has_webhook = bool(job.webhook_url)
 

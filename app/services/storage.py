@@ -87,6 +87,23 @@ class LocalStorage:
         p = job_dir / "structure.json"
         return p if p.exists() else None
 
+    def save_entities(self, job_id: str, body: bytes) -> Path:
+        """Store the extracted-values sidecar (amounts, dates, percentages,
+        policy numbers — normalised, with page + context). Produced for
+        every job regardless of engine."""
+        job_dir = self.base_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        path = job_dir / "entities.json"
+        path.write_bytes(body)
+        return path
+
+    def get_entities_path(self, job_id: str) -> Path | None:
+        job_dir = self.base_dir / job_id
+        if not job_dir.exists():
+            return None
+        p = job_dir / "entities.json"
+        return p if p.exists() else None
+
     def save_preview(self, job_id: str, body: bytes) -> Path:
         """Store the opendataloader HTML preview sidecar.
 

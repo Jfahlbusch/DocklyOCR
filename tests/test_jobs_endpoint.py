@@ -461,3 +461,50 @@ def test_preview_url_set_for_vllm_when_preview_generated(
     assert body["preview_url"] == f"/v1/jobs/{job.id}/preview"
     assert body["engine"] == "vllm"
     assert body["structure_url"] is None  # still vllm-only constraint
+
+
+def test_get_entities_returns_sidecar(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    """The entities sidecar is served for any engine once present."""
+    import json as jsonlib
+
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    job.engine = "vllm"  # engine-agnostic — vllm works too
+    session.add(job)
+    session.commit()
+    sidecar = {"amounts": [{"raw": "500 EUR", "value": 500.0, "page": 1}], "meta": {}}
+    _patch_storage.save_entities(job.id, jsonlib.dumps(sidecar).encode("utf-8"))
+
+    resp = client.get(f"/v1/jobs/{job.id}/entities", headers={"X-API-Key": api_key})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert jsonlib.loads(resp.content)["amounts"][0]["value"] == 500.0
+
+
+def test_job_detail_exposes_entities_url(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    session.add(job)
+    session.commit()
+    _patch_storage.save_result(job.id, b"# md", "md")
+    _patch_storage.save_entities(job.id, b"{}")
+
+    resp = client.get(f"/v1/jobs/{job.id}", headers={"X-API-Key": api_key})
+
+    assert resp.json()["entities_url"] == f"/v1/jobs/{job.id}/entities"
+
+
+def test_get_entities_404_when_absent(
+    client: TestClient, session: Session, _patch_storage: LocalStorage
+) -> None:
+    api_key, customer = _seed_customer(session)
+    job = _seed_job(session, customer)
+    _patch_storage.save_result(job.id, b"# md", "md")
+
+    resp = client.get(f"/v1/jobs/{job.id}/entities", headers={"X-API-Key": api_key})
+    assert resp.status_code == 404

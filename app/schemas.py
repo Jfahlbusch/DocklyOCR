@@ -148,6 +148,11 @@ class JobDetailResponse(BaseModel):
         examples=["/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a/preview"],
         description="Relative URL for the opendataloader HTML preview with inline bounding-box markers. ``null`` for jobs served by the vLLM engine.",
     )
+    entities_url: str | None = Field(
+        default=None,
+        examples=["/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a/entities"],
+        description="Relative URL for the extracted-values sidecar: money amounts, percentages, dates and policy numbers — normalised (German formats → canonical floats / ISO dates) with page number and context snippet. Available for every engine.",
+    )
     result_url: str | None = Field(
         default=None,
         examples=["/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a/result"],

@@ -27,6 +27,7 @@ def _job_to_response(job: Job) -> JobDetailResponse:
     result_url: str | None = None
     structure_url: str | None = None
     preview_url: str | None = None
+    entities_url: str | None = None
     if job.status == JobStatus.done:
         result_url = f"/v1/jobs/{job.id}/result"
         # Structure JSON is opendataloader-only (vLLM has no bounding boxes).
@@ -38,6 +39,9 @@ def _job_to_response(job: Job) -> JobDetailResponse:
         # frontend can use it without engine-specific branching.
         if storage.get_preview_path(job.id) is not None:
             preview_url = f"/v1/jobs/{job.id}/preview"
+        # Entities sidecar is engine-agnostic — exposed whenever present.
+        if storage.get_entities_path(job.id) is not None:
+            entities_url = f"/v1/jobs/{job.id}/entities"
     return JobDetailResponse(
         job_id=job.id,
         status=job.status,
@@ -56,6 +60,7 @@ def _job_to_response(job: Job) -> JobDetailResponse:
         result_url=result_url,
         structure_url=structure_url,
         preview_url=preview_url,
+        entities_url=entities_url,
         webhook_url=job.webhook_url,
         webhook_delivered=job.webhook_delivered,
         webhook_attempts=job.webhook_attempts,
@@ -383,4 +388,56 @@ async def get_job_preview(
         headers={
             "Content-Disposition": f'inline; filename="{stem}.preview.html"',
         },
+    )
+
+
+_GET_ENTITIES_DESCRIPTION = """
+Download the extracted-values sidecar for a completed OCR job.
+
+Contains every money amount, percentage, date and policy number found in
+the document — normalised into machine-readable form (German number
+formats → canonical floats, dates → ISO 8601) with page number and a
+context snippet per value. For opendataloader-served jobs, values that
+could be uniquely located in the PDF also carry ``bbox`` + ``pdf_page``.
+
+The recognition patterns are documented in ``docs/WERTERKENNUNG.md``.
+
+Available for every engine. Returns ``404`` if the sidecar was evicted
+by retention or the job predates the extractor.
+"""
+
+
+@router.get(
+    "/jobs/{job_id}/entities",
+    summary="Download extracted values (amounts, dates, percentages, policy numbers)",
+    description=_GET_ENTITIES_DESCRIPTION,
+    response_model=None,
+    responses={
+        200: {
+            "description": "Normalised values with page, context and (opendataloader) bbox.",
+            "content": {"application/json": {}},
+        },
+        401: {"model": ErrorResponse, "description": "Missing or invalid ``X-API-Key`` header."},
+        404: {"model": ErrorResponse, "description": "No matching job or no entities sidecar."},
+        409: {"model": ErrorResponse, "description": "Job is still processing."},
+    },
+)
+async def get_job_entities(
+    job_id: str,
+    ctx: ApiKeyContext = Depends(require_api_key),  # noqa: B008
+    session: Session = Depends(get_session),  # noqa: B008
+):
+    job = session.get(Job, job_id)
+    if job is None or job.customer_id != ctx.customer.id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != JobStatus.done:
+        raise HTTPException(status_code=409, detail="Result not ready")
+    entities_path = storage.get_entities_path(job_id)
+    if entities_path is None or not entities_path.exists():
+        raise HTTPException(status_code=404, detail="Entities sidecar not available")
+    stem = Path(job.input_filename).stem or "entities"
+    return FileResponse(
+        path=str(entities_path),
+        media_type="application/json",
+        headers={"Content-Disposition": content_disposition_attachment(f"{stem}.entities.json")},
     )

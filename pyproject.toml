@@ -23,7 +23,9 @@ dependencies = [
     "python-json-logger>=2.0",
     "itsdangerous>=2.1",
     "numpy>=1.24",
-    "opendataloader-pdf>=2.4",
+    # Pinned to the tested minor line. A 3.x bump must not arrive silently
+    # on a rebuild — 2.5.x already changed table markup behaviour once.
+    "opendataloader-pdf>=2.5.7,<3",
     "markdown>=3.6",
 ]
 

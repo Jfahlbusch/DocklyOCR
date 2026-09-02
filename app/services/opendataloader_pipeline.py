@@ -136,7 +136,12 @@ def run_opendataloader(
         output_dir=str(tmp_dir),
         format=fmt,
         markdown_page_separator=_PAGE_SEPARATOR,
-        markdown_with_html=True,  # let us emit BBox anchors as <a id=...>
+        # Keep markdown_with_html OFF: it makes opendataloader emit tables
+        # as raw <table>/<th> markup instead of Markdown pipe tables, and
+        # since 2.5.x that markup is malformed (opening tags HTML-escaped,
+        # closing tags not). We don't need it — the BBox anchors below are
+        # injected by _inject_bbox_anchors(), not by opendataloader.
+        markdown_with_html=False,
         quiet=True,
         sanitize=sanitize,
         # external image references rather than base64-embeds → smaller MD

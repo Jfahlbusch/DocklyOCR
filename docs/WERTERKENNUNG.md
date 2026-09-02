@@ -62,7 +62,84 @@ Validierung: Tag 1–31, Monat 1–12. Ungültiges wie `99.99.2026` wird
 verworfen. Ausgeschriebene Monatsnamen (`1. Mai 2026`) werden aktuell
 **nicht** erkannt (siehe §4 Grenzen).
 
-### 1.4 Vertrags-/Policennummern (`policy_numbers`)
+### 1.4 Kategorien — was ein Wert *bedeutet*
+
+Beträge und Daten tragen zusätzlich ein `category`-Feld. Die Zuordnung
+erfolgt über Signalwörter — **nie** über Raten. Findet sich kein
+Signalwort, steht dort `unbekannt`.
+
+**Beträge** (`category`):
+
+| Kategorie | Signalwörter (Auswahl) |
+|---|---|
+| `selbstbehalt` | Selbstbeteiligung, Selbstbehalt, Eigenanteil, SB, Abzugsfranchise |
+| `praemie` | Beitrag, Prämie, Jahresbeitrag, Netto-/Bruttobeitrag, Versicherungsteuer |
+| `sublimit` | Sublimit, Höchstersatzleistung, Entschädigungsgrenze, begrenzt auf, Erstrisikosumme, max. je |
+| `versicherungssumme` | Versicherungssumme, Deckungssumme, Versicherungswert, Haftungssumme, Pauschalsumme |
+| `bemessungsgrundlage` | Umsatz, Lohnsumme, Bausumme, Mietwert, Bemessungsgrundlage |
+| `unbekannt` | kein Signalwort gefunden |
+
+**Daten** (`category`): `vertragsbeginn`, `vertragsablauf`, `stichtag`,
+`unbekannt`.
+
+#### Wie die Zuordnung genau funktioniert
+
+1. **In Tabellen entscheidet der Spaltenheader.**
+   Bei Markdown-Pipe-Tabellen wird die Spalte des Werts bestimmt und die
+   zugehörige Header-Zelle ausgewertet. In
+
+   ```
+   |Position|Versicherungssumme|Selbstbehalt|Anteil|
+   |---|---|---|---|
+   |Feuer|1.500.000,00 EUR|500 EUR|20 %|
+   ```
+
+   wird `1.500.000,00 EUR` zu `versicherungssumme` und `500 EUR` zu
+   `selbstbehalt` — unabhängig davon, was in den Nachbarzellen steht.
+   Sagt der Header nichts Verwertbares (z. B. „Wert A"), bleibt der Wert
+   `unbekannt`; die Nachbarzellen würden nur in die Irre führen.
+
+2. **Im Fließtext gewinnt das nächstgelegene Signalwort.**
+   Zuerst wird der Text **vor** dem Wert geprüft (Deutsch stellt das Label
+   voran: „Selbstbeteiligung: 500 EUR"), erst danach der Text dahinter.
+   Innerhalb eines Fensters zählt die *Nähe*, nicht die Reihenfolge im
+   Katalog. Das ist nötig, weil ein 60-Zeichen-Fenster oft mehrere Werte
+   umfasst: In „Vertragsbeginn: 01.07.2026, Ablauf: 01.07.2027" stehen vor
+   dem zweiten Datum beide Labels — nur die Nähe zeigt, dass es zu
+   „Ablauf" gehört.
+
+### 1.5 Bedingungswerke und Rechtsnormen (`references`)
+
+Zwei geschlossene Vokabulare, exakt gematcht:
+
+**Bedingungswerke** — die Standard-Klauselwerke, mit optionalem Jahrgang:
+`AFB`, `AERB`, `AWB`, `ASTB`, `MFBU`, `ABE`, `ABMG`, `ABN`, `ABU`, `AHB`,
+`BHV`, `AVB-PV`, `AVB-Cyber`, `AVB-WG`, `KFV`, `ULLA`, `D&O`, `VHB`,
+`VGB`, `AVBR`, `BBR`, `AMB`, `AStB`, `ARB`, `AKB`.
+
+```json
+{"raw": "AFB 2008", "type": "bedingungswerk", "code": "AFB", "year": 2008,
+ "page": 12, "context": "Es gelten die AFB 2008 …"}
+```
+
+Gematcht wird nur als eigenständiges Wort — `AFBX` oder `KAHB` erzeugen
+keinen Treffer.
+
+**Rechtsnormen** — `§ 19 VVG`, `§ 823 Abs. 1 BGB`, `Art. 6 DSGVO`:
+
+```json
+{"raw": "§ 19 VVG", "type": "rechtsnorm", "gesetz": "VVG",
+ "paragraph": "19", "page": 7, "context": "Anzeigepflicht nach § 19 VVG …"}
+```
+
+Erkannte Gesetze: VVG, BGB, HGB, AktG, GmbHG, SGB, ZPO, StGB, WEG, VAG,
+AWG, AWV, DSGVO, ProdHaftG, UStG, EStG, InsO, GewO, BImSchG, WHG,
+ArbSchG, StVG.
+
+Beides liefert direkt die Vorarbeit für das Klausel-zu-Phase-Mapping und
+die Rechtszitat-Whitelist der Gutachter-Pipeline.
+
+### 1.6 Vertrags-/Policennummern (`policy_numbers`)
 
 Nur **label-verankert** — eine Nummer wird ausschließlich erkannt, wenn
 direkt davor eine erkennbare Beschriftung steht. Das verhindert, dass
@@ -96,6 +173,9 @@ Jeder Eintrag trägt:
 | `page` | Seite im OCR-Ergebnis (1-basiert) |
 | `context` | ±60 Zeichen Umgebungstext — zeigt, *wozu* der Wert gehört (z. B. „Versicherungssumme Feuer: …") |
 | `bbox` + `pdf_page` | **nur opendataloader-Jobs:** exakte Koordinaten [x1, y1, x2, y2] im Original-PDF, wenn der Wert eindeutig einem Element zuordenbar war |
+| `category` | bei `amounts`/`dates`: was der Wert bedeutet (s. §1.4), `unbekannt` wenn kein Signalwort |
+| `code` / `year` | nur bei `references` vom Typ `bedingungswerk` |
+| `gesetz` / `paragraph` | nur bei `references` vom Typ `rechtsnorm` |
 | `label` | nur bei `policy_numbers`: die gefundene Beschriftung |
 
 Dazu ein `meta`-Block mit Zählern pro Typ, der Engine, die den Text
@@ -110,6 +190,7 @@ erzeugt hat, und der Extractor-Version.
       "raw": "1.500.000,00 EUR",
       "value": 1500000.0,
       "currency": "EUR",
+      "category": "versicherungssumme",
       "page": 3,
       "context": "Versicherungssumme Feuer: 1.500.000,00 EUR je Schadenfall",
       "bbox": [88.1, 553.0, 295.8, 568.5],
@@ -125,10 +206,18 @@ erzeugt hat, und der Extractor-Version.
   "policy_numbers": [
     {"raw": "AB-123456/78", "label": "Versicherungsschein-Nr.", "page": 1, "context": "..."}
   ],
+  "references": [
+    {"raw": "AFB 2008", "type": "bedingungswerk", "code": "AFB", "year": 2008, "page": 12, "context": "..."},
+    {"raw": "§ 19 VVG", "type": "rechtsnorm", "gesetz": "VVG", "paragraph": "19", "page": 7, "context": "..."}
+  ],
   "meta": {
-    "counts": {"amounts": 1, "percentages": 1, "dates": 1, "policy_numbers": 1},
+    "counts": {"amounts": 1, "percentages": 1, "dates": 1, "policy_numbers": 1, "references": 2},
+    "amount_categories": {"versicherungssumme": 1},
+    "date_categories": {"vertragsbeginn": 1},
+    "bedingungswerke": ["AFB"],
+    "rechtsnormen": ["§ 19 VVG"],
     "engine": "opendataloader",
-    "extractor_version": 1
+    "extractor_version": 2
   }
 }
 ```

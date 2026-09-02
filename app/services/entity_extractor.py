@@ -78,6 +78,145 @@ _POLICY_RE = re.compile(
 )
 
 
+# ── Categories ───────────────────────────────────────────────────────────
+# Signal words that classify what a number actually *means*. Matched
+# against the text immediately BEFORE the value (German syntax puts the
+# label first: "Selbstbeteiligung: 500 EUR"), falling back to the text
+# after it. Order matters — the first matching category wins, so more
+# specific terms must come first.
+
+_AMOUNT_CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "selbstbehalt",
+        ("selbstbeteiligung", "selbstbehalt", "eigenanteil", " sb ", "sb:", "abzugsfranchise"),
+    ),
+    (
+        "praemie",
+        (
+            "beitrag",
+            "prämie",
+            "praemie",
+            "versicherungsteuer",
+            "zahlweise",
+            "nettobeitrag",
+            "bruttobeitrag",
+        ),
+    ),
+    (
+        "sublimit",
+        (
+            "sublimit",
+            "höchstersatzleistung",
+            "hoechstersatzleistung",
+            "entschädigungsgrenze",
+            "entschaedigungsgrenze",
+            "begrenzt auf",
+            "erstrisikosumme",
+            "erstes risiko",
+            "maximal je",
+            "max. je",
+            "jahreshöchstleistung",
+        ),
+    ),
+    (
+        "versicherungssumme",
+        (
+            "versicherungssumme",
+            "deckungssumme",
+            "versicherungswert",
+            "haftungssumme",
+            "pauschalsumme",
+            "versichert mit",
+        ),
+    ),
+    (
+        "bemessungsgrundlage",
+        ("umsatz", "lohnsumme", "bausumme", "wertermittlung", "bemessungsgrundlage", "mietwert"),
+    ),
+]
+
+_DATE_CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "vertragsbeginn",
+        ("versicherungsbeginn", "vertragsbeginn", "beginn", "beginnt am", "wirksam ab"),
+    ),
+    (
+        "vertragsablauf",
+        ("ablauf", "vertragsende", "endet am", "hauptfälligkeit", "hauptfaelligkeit", "befristet"),
+    ),
+    ("stichtag", ("stichtag", "bewertungsstichtag", "zum stand", "nachweispflicht", "frist bis")),
+]
+
+# ── References: bedingungswerke + Rechtsnormen ───────────────────────────
+# Standard German insurance condition sets. Matched as whole words with an
+# optional year, e.g. "AFB 2008", "AHB", "AVB-Cyber". The catalogue mirrors
+# the clause-to-phase mapping table in Plan_OpenSource_Gutachter_KI.md.
+_BEDINGUNGSWERKE = (
+    "AFB",
+    "AERB",
+    "AWB",
+    "ASTB",
+    "MFBU",
+    "ABE",
+    "ABMG",
+    "ABN",
+    "ABU",
+    "AHB",
+    "BHV",
+    "AVB-PV",
+    "AVB-Cyber",
+    "AVB-WG",
+    "KFV",
+    "ULLA",
+    "D&O",
+    "VHB",
+    "VGB",
+    "AVBR",
+    "BBR",
+    "AMB",
+    "AStB",
+    "ARB",
+    "AKB",
+)
+_BEDINGUNGSWERK_RE = re.compile(
+    r"(?<![A-Za-z0-9-])(?P<code>"
+    + "|".join(re.escape(c) for c in sorted(_BEDINGUNGSWERKE, key=len, reverse=True))
+    + r")(?![A-Za-z0-9])(?:\s?(?P<year>(?:19|20)\d{2}))?"
+)
+
+# "§ 19 VVG", "§§ 19, 20 VVG", "§ 823 Abs. 1 BGB", "Art. 5 DSGVO"
+_GESETZE = (
+    "VVG",
+    "BGB",
+    "HGB",
+    "AktG",
+    "GmbHG",
+    "SGB",
+    "ZPO",
+    "StGB",
+    "WEG",
+    "VAG",
+    "AWG",
+    "AWV",
+    "DSGVO",
+    "ProdHaftG",
+    "UStG",
+    "EStG",
+    "InsO",
+    "GewO",
+    "BImSchG",
+    "WHG",
+    "ArbSchG",
+    "StVG",
+)
+_NORM_RE = re.compile(
+    r"(?P<sym>§{1,2}|Art\.)\s?(?P<num>\d{1,4}[a-z]?)"
+    r"(?P<extra>(?:\s?(?:Abs\.|Absatz|Satz|Nr\.|Ziffer)\s?\d+[a-z]?)*)"
+    r"(?:\s?(?:und|,)\s?\d{1,4}[a-z]?)*"
+    r"\s?(?P<gesetz>" + "|".join(_GESETZE) + r")(?![A-Za-z])"
+)
+
+
 def _to_float_german(int_part: str, dec_part: str | None) -> float:
     """``1.500.000`` + ``50`` → 1500000.50; ``,--``/``,-`` counts as ,00."""
     value = float(int_part.replace(".", ""))
@@ -93,6 +232,106 @@ def _context(text: str, start: int, end: int) -> str:
     return snippet
 
 
+# A Markdown table separator row: |---|---|---| (with optional colons)
+_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _table_column_label(text: str, pos: int) -> str | None:
+    """If ``pos`` sits in a Markdown pipe-table data row, return that
+    column's header cell.
+
+    Rate tables are everywhere in insurance documents, and there the
+    meaning of a number comes from its column header, not from the words
+    next to it. Without this, "1.500.000,00 EUR" in the
+    *Versicherungssumme* column gets mislabelled from whatever header
+    happens to fall inside the character window.
+    """
+    line_start = text.rfind("\n", 0, pos) + 1
+    line_end = text.find("\n", pos)
+    if line_end < 0:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    if line.count("|") < 2:
+        return None
+
+    column = line[: pos - line_start].count("|") - 1
+    if column < 0:
+        return None
+
+    # Walk upwards to the separator row; the header is the line above it.
+    lines_above = text[:line_start].splitlines()
+    for i in range(len(lines_above) - 1, -1, -1):
+        candidate = lines_above[i]
+        if _TABLE_SEP_RE.match(candidate):
+            if i == 0:
+                return None
+            cells = [c.strip() for c in lines_above[i - 1].strip().strip("|").split("|")]
+            return cells[column] if 0 <= column < len(cells) else None
+        if "|" not in candidate:
+            return None  # left the table before finding a header
+    return None
+
+
+def _match_catalogue(window: str, catalogue: list[tuple[str, tuple[str, ...]]]) -> str:
+    """First matching category in catalogue order, or ``"unbekannt"``."""
+    for category, needles in catalogue:
+        if any(n in window for n in needles):
+            return category
+    return "unbekannt"
+
+
+def _categorize(
+    text: str,
+    start: int,
+    end: int,
+    catalogue: list[tuple[str, tuple[str, ...]]],
+) -> str:
+    """Classify a value by the signal words around it.
+
+    The text BEFORE the value is checked first — German writes the label
+    ahead of the number ("Selbstbeteiligung: 500 EUR"). Only if nothing
+    matches there do we look at the text after it.
+
+    Within a window the *nearest* signal word wins, not the first one in
+    the catalogue. That matters because the context window routinely spans
+    several values: in "Vertragsbeginn: 01.07.2026, Ablauf: 01.07.2027"
+    both labels precede the second date, and only proximity tells us that
+    it belongs to "Ablauf".
+
+    Inside a Markdown table the column header decides instead — see
+    :func:`_table_column_label`.
+
+    Returns ``"unbekannt"`` when no signal word is found; we never guess.
+    """
+    header = _table_column_label(text, start)
+    if header:
+        from_header = _match_catalogue(f" {header.lower()} ", catalogue)
+        if from_header != "unbekannt":
+            return from_header
+        # In a table but the header says nothing useful — the surrounding
+        # cells would only mislead, so stop here.
+        return "unbekannt"
+
+    before = " " + " ".join(text[max(0, start - _CONTEXT_CHARS) : start].split()).lower() + " "
+    after = " " + " ".join(text[end : end + _CONTEXT_CHARS].split()).lower() + " "
+
+    # In `before` the closest signal word is the LAST occurrence; in
+    # `after` it is the first. Score by distance to the value.
+    for window, nearest in ((before, "last"), (after, "first")):
+        best_category, best_distance = "unbekannt", None
+        for category, needles in catalogue:
+            for needle in needles:
+                pos = window.rfind(needle) if nearest == "last" else window.find(needle)
+                if pos < 0:
+                    continue
+                distance = len(window) - pos if nearest == "last" else pos
+                if best_distance is None or distance < best_distance:
+                    best_category, best_distance = category, distance
+        if best_distance is not None:
+            return best_category
+    return "unbekannt"
+
+
 def _extract_amounts(text: str, page: int) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     spans: list[tuple[int, int]] = []
@@ -105,6 +344,7 @@ def _extract_amounts(text: str, page: int) -> list[dict[str, Any]]:
                 "raw": m.group(0).strip(),
                 "value": num * multiplier,
                 "currency": "EUR",
+                "category": _categorize(text, m.start(), m.end(), _AMOUNT_CATEGORIES),
                 "page": page,
                 "context": _context(text, m.start(), m.end()),
             }
@@ -127,6 +367,7 @@ def _extract_amounts(text: str, page: int) -> list[dict[str, Any]]:
                     "raw": m.group(0).strip(),
                     "value": value,
                     "currency": "EUR",
+                    "category": _categorize(text, m.start(), m.end(), _AMOUNT_CATEGORIES),
                     "page": page,
                     "context": _context(text, m.start(), m.end()),
                 }
@@ -159,6 +400,7 @@ def _extract_dates(text: str, page: int) -> list[dict[str, Any]]:
             {
                 "raw": m.group(0),
                 "iso": f"{year:04d}-{month:02d}-{day:02d}",
+                "category": _categorize(text, m.start(), m.end(), _DATE_CATEGORIES),
                 "page": page,
                 "context": _context(text, m.start(), m.end()),
             }
@@ -177,6 +419,41 @@ def _extract_policy_numbers(text: str, page: int) -> list[dict[str, Any]]:
             {
                 "raw": num,
                 "label": " ".join(m.group("label").split()),
+                "page": page,
+                "context": _context(text, m.start(), m.end()),
+            }
+        )
+    return out
+
+
+def _extract_references(text: str, page: int) -> list[dict[str, Any]]:
+    """Find condition sets (AFB 2008, AHB, …) and legal norms (§ 19 VVG).
+
+    These feed the clause-to-phase mapping and the legal-citation
+    whitelist of the Gutachter pipeline. Both are closed vocabularies, so
+    matching is exact — no guessing about what a code might mean.
+    """
+    out: list[dict[str, Any]] = []
+
+    for m in _BEDINGUNGSWERK_RE.finditer(text):
+        entry: dict[str, Any] = {
+            "raw": " ".join(m.group(0).split()),
+            "type": "bedingungswerk",
+            "code": m.group("code"),
+            "page": page,
+            "context": _context(text, m.start(), m.end()),
+        }
+        if m.group("year"):
+            entry["year"] = int(m.group("year"))
+        out.append(entry)
+
+    for m in _NORM_RE.finditer(text):
+        out.append(
+            {
+                "raw": " ".join(m.group(0).split()),
+                "type": "rechtsnorm",
+                "gesetz": m.group("gesetz"),
+                "paragraph": m.group("num"),
                 "page": page,
                 "context": _context(text, m.start(), m.end()),
             }
@@ -232,13 +509,14 @@ def extract_entities(result: OcrResult, structure_path: Path | None = None) -> d
 
     Returns:
         JSON-serialisable dict with keys ``amounts``, ``percentages``,
-        ``dates``, ``policy_numbers`` and a ``meta`` block.
+        ``dates``, ``policy_numbers``, ``references`` and a ``meta`` block.
     """
     entities: dict[str, Any] = {
         "amounts": [],
         "percentages": [],
         "dates": [],
         "policy_numbers": [],
+        "references": [],
     }
 
     for pageresult in result.pages:
@@ -249,6 +527,7 @@ def extract_entities(result: OcrResult, structure_path: Path | None = None) -> d
         entities["percentages"] += _extract_percentages(pageresult.text, page)
         entities["dates"] += _extract_dates(pageresult.text, page)
         entities["policy_numbers"] += _extract_policy_numbers(pageresult.text, page)
+        entities["references"] += _extract_references(pageresult.text, page)
 
     # Dedupe: identical (raw, page) pairs appear when a value is repeated
     # inside the same page (e.g. table + footnote) — keep first occurrence.
@@ -268,6 +547,25 @@ def extract_entities(result: OcrResult, structure_path: Path | None = None) -> d
 
     entities["meta"] = {
         "counts": {k: len(v) for k, v in entities.items() if isinstance(v, list)},
-        "extractor_version": 1,
+        # Rolled-up view so consumers can answer "which condition sets
+        # apply?" / "how are the amounts distributed?" without iterating.
+        "amount_categories": _tally(entities["amounts"], "category"),
+        "date_categories": _tally(entities["dates"], "category"),
+        "bedingungswerke": sorted(
+            {r["code"] for r in entities["references"] if r["type"] == "bedingungswerk"}
+        ),
+        "rechtsnormen": sorted(
+            {r["raw"] for r in entities["references"] if r["type"] == "rechtsnorm"}
+        ),
+        "extractor_version": 2,
     }
     return entities
+
+
+def _tally(bucket: list[dict[str, Any]], key: str) -> dict[str, int]:
+    """Count occurrences of ``key`` values, most frequent first."""
+    counts: dict[str, int] = {}
+    for item in bucket:
+        v = item.get(key, "unbekannt")
+        counts[v] = counts.get(v, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))

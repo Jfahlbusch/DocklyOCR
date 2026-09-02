@@ -168,3 +168,170 @@ def test_bbox_skipped_when_ambiguous(tmp_path: Path) -> None:
 
     e = extract_entities(_result_from_text("SB 500 EUR"), structure_path=sp)
     assert "bbox" not in e["amounts"][0]
+
+
+# ── Kategorien: Beträge ──────────────────────────────────────────────────
+
+
+def test_amount_category_selbstbehalt() -> None:
+    e = extract_entities(_result_from_text("Selbstbeteiligung: 500 EUR je Schadenfall"))
+    assert e["amounts"][0]["category"] == "selbstbehalt"
+
+
+def test_amount_category_versicherungssumme() -> None:
+    e = extract_entities(_result_from_text("Die Versicherungssumme beträgt 1.500.000,00 EUR"))
+    assert e["amounts"][0]["category"] == "versicherungssumme"
+
+
+def test_amount_category_praemie() -> None:
+    e = extract_entities(_result_from_text("Der Jahresbeitrag beläuft sich auf 2.345,-- EUR"))
+    assert e["amounts"][0]["category"] == "praemie"
+
+
+def test_amount_category_sublimit() -> None:
+    e = extract_entities(_result_from_text("Sublimit: 300.000 EUR je Position"))
+    assert e["amounts"][0]["category"] == "sublimit"
+
+
+def test_amount_category_bemessungsgrundlage() -> None:
+    e = extract_entities(_result_from_text("Jahresumsatz 4.000.000 EUR laut Meldebogen"))
+    assert e["amounts"][0]["category"] == "bemessungsgrundlage"
+
+
+def test_amount_category_unknown_when_no_signal() -> None:
+    """No signal word → 'unbekannt'. We never guess."""
+    e = extract_entities(_result_from_text("Es wurden 750 EUR erwähnt."))
+    assert e["amounts"][0]["category"] == "unbekannt"
+
+
+def test_amount_category_label_before_wins_over_after() -> None:
+    """German puts the label first — the word BEFORE the value decides."""
+    text = "Selbstbeteiligung 500 EUR, die Versicherungssumme folgt danach"
+    e = extract_entities(_result_from_text(text))
+    assert e["amounts"][0]["category"] == "selbstbehalt"
+
+
+def test_amount_categories_tallied_in_meta() -> None:
+    text = "Versicherungssumme 1.000.000 EUR. Selbstbeteiligung 500 EUR. Beitrag 900 EUR."
+    e = extract_entities(_result_from_text(text))
+    tally = e["meta"]["amount_categories"]
+    assert tally["versicherungssumme"] == 1
+    assert tally["selbstbehalt"] == 1
+    assert tally["praemie"] == 1
+
+
+# ── Kategorien: Daten ────────────────────────────────────────────────────
+
+
+def test_date_category_beginn_und_ablauf() -> None:
+    e = extract_entities(_result_from_text("Vertragsbeginn: 01.07.2026, Ablauf: 01.07.2027"))
+    cats = {d["iso"]: d["category"] for d in e["dates"]}
+    assert cats["2026-07-01"] == "vertragsbeginn"
+    assert cats["2027-07-01"] == "vertragsablauf"
+
+
+def test_date_category_unknown() -> None:
+    e = extract_entities(_result_from_text("Irgendwann am 15.03.2026 passierte etwas."))
+    assert e["dates"][0]["category"] == "unbekannt"
+
+
+# ── References: Bedingungswerke ──────────────────────────────────────────
+
+
+def test_reference_bedingungswerk_with_year() -> None:
+    e = extract_entities(_result_from_text("Es gelten die AFB 2008 in der aktuellen Fassung."))
+    refs = [r for r in e["references"] if r["type"] == "bedingungswerk"]
+    assert len(refs) == 1
+    assert refs[0]["code"] == "AFB"
+    assert refs[0]["year"] == 2008
+    assert refs[0]["raw"] == "AFB 2008"
+
+
+def test_reference_bedingungswerk_without_year() -> None:
+    e = extract_entities(_result_from_text("Grundlage sind die AHB sowie ergänzende Klauseln."))
+    refs = [r for r in e["references"] if r["type"] == "bedingungswerk"]
+    assert refs[0]["code"] == "AHB"
+    assert "year" not in refs[0]
+
+
+def test_reference_hyphenated_codes() -> None:
+    e = extract_entities(_result_from_text("Zusätzlich vereinbart: AVB-Cyber und AVB-PV 2021."))
+    codes = {r["code"] for r in e["references"] if r["type"] == "bedingungswerk"}
+    assert "AVB-Cyber" in codes
+    assert "AVB-PV" in codes
+
+
+def test_reference_not_matched_inside_word() -> None:
+    """'AFBX' or 'KAHB' must not produce a false positive."""
+    e = extract_entities(_result_from_text("Der Code AFBX und das Kuerzel KAHB sind irrelevant."))
+    assert [r for r in e["references"] if r["type"] == "bedingungswerk"] == []
+
+
+# ── References: Rechtsnormen ─────────────────────────────────────────────
+
+
+def test_reference_rechtsnorm_simple() -> None:
+    e = extract_entities(_result_from_text("Anzeigepflicht nach § 19 VVG bei Gefahrerhöhung."))
+    norms = [r for r in e["references"] if r["type"] == "rechtsnorm"]
+    assert norms[0]["gesetz"] == "VVG"
+    assert norms[0]["paragraph"] == "19"
+
+
+def test_reference_rechtsnorm_with_absatz() -> None:
+    e = extract_entities(_result_from_text("Haftung gemäß § 823 Abs. 1 BGB bleibt unberührt."))
+    norms = [r for r in e["references"] if r["type"] == "rechtsnorm"]
+    assert norms[0]["gesetz"] == "BGB"
+    assert norms[0]["paragraph"] == "823"
+
+
+def test_reference_rechtsnorm_artikel() -> None:
+    e = extract_entities(_result_from_text("Verarbeitung nach Art. 6 DSGVO."))
+    norms = [r for r in e["references"] if r["type"] == "rechtsnorm"]
+    assert norms[0]["gesetz"] == "DSGVO"
+    assert norms[0]["paragraph"] == "6"
+
+
+def test_reference_meta_rollup() -> None:
+    text = "Es gelten AFB 2008 und AHB. Anzeigepflicht nach § 19 VVG, ferner § 75 VVG."
+    e = extract_entities(_result_from_text(text))
+    assert e["meta"]["bedingungswerke"] == ["AFB", "AHB"]
+    assert "§ 19 VVG" in e["meta"]["rechtsnormen"]
+    assert "§ 75 VVG" in e["meta"]["rechtsnormen"]
+
+
+def test_extractor_version_bumped_to_2() -> None:
+    e = extract_entities(_result_from_text("nichts besonderes"))
+    assert e["meta"]["extractor_version"] == 2
+
+
+# ── Kategorien in Tabellen (Spaltenheader entscheidet) ───────────────────
+
+_TABLE = """|Position|Versicherungssumme|Selbstbehalt|Anteil|
+|---|---|---|---|
+|Feuer|1.500.000,00 EUR|500 EUR|20 %|
+|Leitungswasser|300.000 EUR|250 EUR|10 %|
+"""
+
+
+def test_table_column_header_decides_category() -> None:
+    e = extract_entities(_result_from_text(_TABLE))
+    by_raw = {a["raw"]: a["category"] for a in e["amounts"]}
+    assert by_raw["1.500.000,00 EUR"] == "versicherungssumme"
+    assert by_raw["300.000 EUR"] == "versicherungssumme"
+    assert by_raw["500 EUR"] == "selbstbehalt"
+    assert by_raw["250 EUR"] == "selbstbehalt"
+
+
+def test_table_without_meaningful_header_stays_unknown() -> None:
+    """Neighbouring cells must not leak in when the header says nothing."""
+    table = "|Pos|Wert A|Wert B|\n|---|---|---|\n|X|900 EUR|800 EUR|\n"
+    e = extract_entities(_result_from_text(table))
+    assert all(a["category"] == "unbekannt" for a in e["amounts"])
+
+
+def test_prose_after_table_still_uses_proximity() -> None:
+    text = _TABLE + "\nDie Selbstbeteiligung beträgt zusätzlich 750 EUR.\n"
+    e = extract_entities(_result_from_text(text))
+    by_raw = {a["raw"]: a["category"] for a in e["amounts"]}
+    assert by_raw["750 EUR"] == "selbstbehalt"
+    assert by_raw["1.500.000,00 EUR"] == "versicherungssumme"

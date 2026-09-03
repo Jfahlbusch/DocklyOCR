@@ -53,14 +53,27 @@ Leerzeichen vor dem `%` ist optional; Dezimalstellen mit Komma.
 
 ### 1.3 Datumsangaben (`dates`)
 
-| Schreibweise | normalisiert (`iso`) |
+| Schreibweise | Ergebnis |
 |---|---|
 | `01.05.2026` | `2026-05-01` |
-| `1.5.27` | `2027-05-01` (zweistellige Jahre → `20xx`) |
+| `1.5.2026` | `2026-05-01` (vierstelliges Jahr genügt) |
+| `01.05.27` | `2027-05-01` (Kurzform mit führenden Nullen) |
+| `1.5.27` | — **kein** Datum |
+| `Ziffer 1.5.24` | — **kein** Datum |
 
 Validierung: Tag 1–31, Monat 1–12. Ungültiges wie `99.99.2026` wird
-verworfen. Ausgeschriebene Monatsnamen (`1. Mai 2026`) werden aktuell
-**nicht** erkannt (siehe §4 Grenzen).
+verworfen.
+
+**Warum die Kurzform führende Nullen braucht:** Versicherungsbedingungen
+sind voller Gliederungsnummern wie „Ziffer 1.5.24" oder „Abschnitt
+1.12.10". Ohne diese Regel würden sie als Datumsangaben gelesen — bei
+einem realen 127-seitigen Versicherungsschein waren das über 100
+Fehltreffer. Zusätzlich werden Zahlen verworfen, denen `Ziffer`, `Nr.`,
+`Nummer`, `Abschnitt` oder `Punkt` unmittelbar vorausgeht. Ein falsches
+Datum ist schlimmer als ein fehlendes.
+
+Ausgeschriebene Monatsnamen (`1. Mai 2026`) werden **nicht** erkannt
+(siehe §4 Grenzen).
 
 ### 1.4 Kategorien — was ein Wert *bedeutet*
 

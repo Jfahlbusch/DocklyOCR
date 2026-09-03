@@ -72,7 +72,9 @@ def test_percentage_simple_and_decimal() -> None:
 
 
 def test_date_normalised_to_iso() -> None:
-    e = extract_entities(_result_from_text("Vertragsbeginn: 01.05.2026, Ablauf 1.5.27"))
+    # Kurzform braucht führende Nullen — "1.5.27" wäre nicht von einer
+    # Gliederungsnummer zu unterscheiden (s. test_unpadded_short_date_rejected).
+    e = extract_entities(_result_from_text("Vertragsbeginn: 01.05.2026, Ablauf 01.05.27"))
     isos = sorted(d["iso"] for d in e["dates"])
     assert isos == ["2026-05-01", "2027-05-01"]
 
@@ -524,3 +526,46 @@ def test_entschaedigungsleistung_is_sublimit() -> None:
         _result_from_text("Die Entschädigungsleistung ist auf max. 10.000 EUR begrenzt")
     )
     assert e["amounts"][0]["category"] == "sublimit"
+
+
+# ── Falsche Datums-Treffer durch Gliederungsnummern ──────────────────────
+
+
+def test_clause_numbering_is_not_a_date() -> None:
+    """'Ziffer 1.5.24' ist eine Gliederungsnummer, kein 24.05.2024."""
+    e = extract_entities(
+        _result_from_text("Die Anzeigepflicht nach Ziffer 1.5.24 bleibt bestehen.")
+    )
+    assert e["dates"] == []
+
+
+def test_unpadded_short_date_rejected() -> None:
+    """'1.5.24' ohne führende Nullen ist typisch für Gliederungen."""
+    e = extract_entities(_result_from_text("Der Abschnitt 1.5.24 regelt Folgendes."))
+    assert e["dates"] == []
+
+
+def test_padded_short_date_accepted() -> None:
+    """'01.05.24' mit führenden Nullen ist ein Datum."""
+    e = extract_entities(_result_from_text("Vertragsbeginn: 01.05.24"))
+    assert e["dates"][0]["iso"] == "2024-05-01"
+
+
+def test_full_year_short_day_still_accepted() -> None:
+    """Vierstelliges Jahr genügt — Tag/Monat dürfen einstellig sein."""
+    e = extract_entities(_result_from_text("Ablauf 1.7.2027"))
+    assert e["dates"][0]["iso"] == "2027-07-01"
+
+
+def test_clause_with_full_year_also_rejected() -> None:
+    e = extract_entities(_result_from_text("gemäß Nr. 3.2.2019 der Bedingungen"))
+    assert e["dates"] == []
+
+
+def test_real_anchor_format_is_stripped() -> None:
+    """Die echten Anker heißen 'odl-p16-bbox-...' — der Filter muss sie
+    vollständig entfernen, nicht nur den numerischen Teil."""
+    text = '<a id="odl-p16-bbox-86.4-482.4-445.6-492.7"></a> Sublimit: 20.000 EUR'
+    e = extract_entities(_result_from_text(text))
+    assert e["amounts"][0]["category"] == "sublimit"
+    assert "odl-p" not in e["amounts"][0]["context"]

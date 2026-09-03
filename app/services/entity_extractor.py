@@ -35,7 +35,7 @@ _CONTEXT_CHARS = 60  # snippet radius around each match
 # '...bbox-88.1-428.8-280.4-439.6"></a>' instead of "Sublimit:". Strip them
 # before any analysis — result.md keeps them, only the extractor doesn't
 # see them.
-_BBOX_ANCHOR_RE = re.compile(r'<a id="odl-p[0-9.\-]+"></a>\s*')
+_BBOX_ANCHOR_RE = re.compile(r'<a id="odl-p[^"]*"></a>\s*')
 
 # PDF text extraction routinely inserts spaces inside words when the
 # original uses wide letter spacing ("Sub limit", "Versicherungssum me").
@@ -78,7 +78,17 @@ _PERCENT_RE = re.compile(r"(?<![\d.,])(?P<num>\d{1,3}(?:,\d{1,2})?)\s?%")
 # ── Dates ────────────────────────────────────────────────────────────────
 # 01.01.2026 | 1.1.26 — validated (month 1-12, day 1-31); 2-digit years
 # are expanded to 20xx.
-_DATE_RE = re.compile(r"\b(?P<d>\d{1,2})\.(?P<m>\d{1,2})\.(?P<y>\d{4}|\d{2})\b")
+# Full form always wins: 1.5.2026 / 01.05.2026. A two-digit year is only
+# accepted when day AND month are zero-padded (01.05.24) — insurance
+# documents are full of clause numbers like "Ziffer 1.5.24" that would
+# otherwise be read as dates. A false date is worse than a missing one.
+_DATE_RE = re.compile(
+    r"\b(?:(?P<d>\d{1,2})\.(?P<m>\d{1,2})\.(?P<y>\d{4})"
+    r"|(?P<d2>\d{2})\.(?P<m2>\d{2})\.(?P<y2>\d{2}))\b(?!\.?\d)"
+)
+
+# "Ziffer 1.5.24", "gemäß Nr. 3.2.19" — never dates.
+_CLAUSE_PREFIX_RE = re.compile(r"(ziffer|nr\.|nummer|abschnitt|punkt)\s*$", re.IGNORECASE)
 
 # ── Policy / contract numbers ────────────────────────────────────────────
 # Label-anchored: only sequences directly following a recognisable label
@@ -161,7 +171,6 @@ _AMOUNT_CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
             "versicherungssumme je",
             "deckungssumme der",
             "pauschal für",
-            "je versicherungsfall",
         ),
     ),
     (
@@ -458,9 +467,15 @@ def _extract_percentages(text: str, page: int) -> list[dict[str, Any]]:
 def _extract_dates(text: str, page: int) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for m in _DATE_RE.finditer(text):
-        day, month = int(m.group("d")), int(m.group("m"))
-        year_raw = m.group("y")
+        # Two alternatives in the pattern: full year, or zero-padded short form
+        if m.group("d") is not None:
+            day, month, year_raw = int(m.group("d")), int(m.group("m")), m.group("y")
+        else:
+            day, month, year_raw = int(m.group("d2")), int(m.group("m2")), m.group("y2")
         if not (1 <= day <= 31 and 1 <= month <= 12):
+            continue
+        # Skip clause references: "Ziffer 1.5.2024" is a numbering, not a date
+        if _CLAUSE_PREFIX_RE.search(text[max(0, m.start() - 24) : m.start()]):
             continue
         year = int(year_raw) if len(year_raw) == 4 else 2000 + int(year_raw)
         out.append(

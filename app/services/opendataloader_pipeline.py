@@ -160,6 +160,14 @@ def run_opendataloader(
 
     full_text = md_file.read_text(encoding="utf-8")
 
+    # opendataloader emits the page separator at the START of the document
+    # as well, not only between pages. Splitting naively therefore yields a
+    # phantom empty first page: every page number shifts by one and the job
+    # reports e.g. "9 of 10 pages OK" for a 9-page PDF. Remember whether the
+    # artefact is present so the split below can drop it.
+    _leading_separator = full_text.startswith(_PAGE_SEPARATOR)
+    _trailing_separator = full_text.endswith(_PAGE_SEPARATOR)
+
     # Persist the JSON sidecar to the caller-chosen path (worker → storage)
     if structure_path is not None:
         json_file = tmp_dir / f"{input_path.stem}.json"
@@ -206,6 +214,13 @@ def run_opendataloader(
     # Split on our sentinel. opendataloader emits the separator BETWEEN
     # pages, so N pages → N-1 separators → N chunks.
     chunks = full_text.split(_PAGE_SEPARATOR)
+    # Drop the phantom chunks created by separators at the document edges
+    # (see above). Only edge chunks are removed, so a genuinely blank page
+    # in the middle still counts as a page.
+    if _leading_separator and chunks:
+        chunks = chunks[1:]
+    if _trailing_separator and chunks:
+        chunks = chunks[:-1]
 
     pages: list[PageResult] = []
     # Per-page elapsed: we only have a single total time. Distribute it

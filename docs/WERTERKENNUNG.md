@@ -84,9 +84,23 @@ Signalwort, steht dort `unbekannt`.
 
 #### Wie die Zuordnung genau funktioniert
 
+Jeder Wert trägt neben `category` auch ein `category_source`, das zeigt,
+**woher** die Kategorie stammt — damit nachgelagerte Systeme entscheiden
+können, wie sehr sie ihr trauen:
+
+| `category_source` | Bedeutung | Verlässlichkeit |
+|---|---|---|
+| `table_header` | aus der JSON-Tabellenstruktur (echtes Spaltenraster inkl. verbundener Zellen) | am höchsten |
+| `table_header_md` | aus einer Markdown-Pipe-Tabelle (Fallback ohne `structure.json`, z. B. vLLM-Jobs) | hoch |
+| `proximity` | nächstgelegenes Signalwort im Fließtext | mittel |
+| `none` | kein Signalwort gefunden → `category` ist `unbekannt` | — |
+
 1. **In Tabellen entscheidet der Spaltenheader.**
-   Bei Markdown-Pipe-Tabellen wird die Spalte des Werts bestimmt und die
-   zugehörige Header-Zelle ausgewertet. In
+   Liegt eine `structure.json` vor (opendataloader-Jobs), wird das echte
+   Spaltenraster ausgewertet: Zeile 1 ist die Kopfzeile, `column span`
+   wird berücksichtigt (ein über zwei Spalten laufender Header gilt für
+   beide). Ohne Strukturdatei greift ersatzweise das Parsen von
+   Markdown-Pipe-Tabellen. In
 
    ```
    |Position|Versicherungssumme|Selbstbehalt|Anteil|
@@ -98,6 +112,13 @@ Signalwort, steht dort `unbekannt`.
    `selbstbehalt` — unabhängig davon, was in den Nachbarzellen steht.
    Sagt der Header nichts Verwertbares (z. B. „Wert A"), bleibt der Wert
    `unbekannt`; die Nachbarzellen würden nur in die Irre führen.
+
+   Die Zuordnung ist **seitenweise** isoliert. Derselbe Betrag steht oft
+   zweimal im Dokument — einmal als Versicherungssumme in der Tarif­tabelle
+   und Seiten später erneut als Sublimit im Fließtext. Ohne Seitenprüfung
+   würde der Tabellenheader das Fließtext-Vorkommen überschreiben.
+   Passt ein Wert auf mehrere Zellen derselben Seite, bleibt seine
+   Kategorie unverändert (Mehrdeutigkeit).
 
 2. **Im Fließtext gewinnt das nächstgelegene Signalwort.**
    Zuerst wird der Text **vor** dem Wert geprüft (Deutsch stellt das Label
@@ -174,6 +195,7 @@ Jeder Eintrag trägt:
 | `context` | ±60 Zeichen Umgebungstext — zeigt, *wozu* der Wert gehört (z. B. „Versicherungssumme Feuer: …") |
 | `bbox` + `pdf_page` | **nur opendataloader-Jobs:** exakte Koordinaten [x1, y1, x2, y2] im Original-PDF, wenn der Wert eindeutig einem Element zuordenbar war |
 | `category` | bei `amounts`/`dates`: was der Wert bedeutet (s. §1.4), `unbekannt` wenn kein Signalwort |
+| `category_source` | woher die Kategorie stammt: `table_header`, `table_header_md`, `proximity` oder `none` |
 | `code` / `year` | nur bei `references` vom Typ `bedingungswerk` |
 | `gesetz` / `paragraph` | nur bei `references` vom Typ `rechtsnorm` |
 | `label` | nur bei `policy_numbers`: die gefundene Beschriftung |
@@ -191,6 +213,7 @@ erzeugt hat, und der Extractor-Version.
       "value": 1500000.0,
       "currency": "EUR",
       "category": "versicherungssumme",
+      "category_source": "table_header",
       "page": 3,
       "context": "Versicherungssumme Feuer: 1.500.000,00 EUR je Schadenfall",
       "bbox": [88.1, 553.0, 295.8, 568.5],

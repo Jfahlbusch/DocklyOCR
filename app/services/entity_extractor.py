@@ -285,8 +285,12 @@ def _categorize(
     start: int,
     end: int,
     catalogue: list[tuple[str, tuple[str, ...]]],
-) -> str:
+) -> tuple[str, str]:
     """Classify a value by the signal words around it.
+
+    Returns ``(category, source)``. The source tells consumers how the
+    category was derived — ``table_header_md`` (Markdown column header),
+    ``proximity`` (nearest signal word in prose), or ``none``.
 
     The text BEFORE the value is checked first — German writes the label
     ahead of the number ("Selbstbeteiligung: 500 EUR"). Only if nothing
@@ -307,10 +311,10 @@ def _categorize(
     if header:
         from_header = _match_catalogue(f" {header.lower()} ", catalogue)
         if from_header != "unbekannt":
-            return from_header
+            return from_header, "table_header_md"
         # In a table but the header says nothing useful — the surrounding
         # cells would only mislead, so stop here.
-        return "unbekannt"
+        return "unbekannt", "none"
 
     before = " " + " ".join(text[max(0, start - _CONTEXT_CHARS) : start].split()).lower() + " "
     after = " " + " ".join(text[end : end + _CONTEXT_CHARS].split()).lower() + " "
@@ -328,8 +332,14 @@ def _categorize(
                 if best_distance is None or distance < best_distance:
                     best_category, best_distance = category, distance
         if best_distance is not None:
-            return best_category
-    return "unbekannt"
+            return best_category, "proximity"
+    return "unbekannt", "none"
+
+
+def _as_category_fields(result: tuple[str, str]) -> dict[str, str]:
+    """Spread a ``(category, source)`` tuple into the entity dict."""
+    category, source = result
+    return {"category": category, "category_source": source}
 
 
 def _extract_amounts(text: str, page: int) -> list[dict[str, Any]]:
@@ -344,7 +354,7 @@ def _extract_amounts(text: str, page: int) -> list[dict[str, Any]]:
                 "raw": m.group(0).strip(),
                 "value": num * multiplier,
                 "currency": "EUR",
-                "category": _categorize(text, m.start(), m.end(), _AMOUNT_CATEGORIES),
+                **_as_category_fields(_categorize(text, m.start(), m.end(), _AMOUNT_CATEGORIES)),
                 "page": page,
                 "context": _context(text, m.start(), m.end()),
             }
@@ -367,7 +377,9 @@ def _extract_amounts(text: str, page: int) -> list[dict[str, Any]]:
                     "raw": m.group(0).strip(),
                     "value": value,
                     "currency": "EUR",
-                    "category": _categorize(text, m.start(), m.end(), _AMOUNT_CATEGORIES),
+                    **_as_category_fields(
+                        _categorize(text, m.start(), m.end(), _AMOUNT_CATEGORIES)
+                    ),
                     "page": page,
                     "context": _context(text, m.start(), m.end()),
                 }
@@ -400,7 +412,7 @@ def _extract_dates(text: str, page: int) -> list[dict[str, Any]]:
             {
                 "raw": m.group(0),
                 "iso": f"{year:04d}-{month:02d}-{day:02d}",
-                "category": _categorize(text, m.start(), m.end(), _DATE_CATEGORIES),
+                **_as_category_fields(_categorize(text, m.start(), m.end(), _DATE_CATEGORIES)),
                 "page": page,
                 "context": _context(text, m.start(), m.end()),
             }
@@ -461,6 +473,141 @@ def _extract_references(text: str, page: int) -> list[dict[str, Any]]:
     return out
 
 
+def _cell_text(cell: dict) -> str:
+    """Concatenate the text of a table cell's child elements.
+
+    opendataloader leaves ``content`` empty on ``table cell`` nodes; the
+    actual text sits in the ``kids`` paragraphs.
+    """
+    parts: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("content"):
+                parts.append(str(node["content"]))
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    for kid in cell.get("kids", []):
+        walk(kid)
+    return " ".join(" ".join(parts).split())
+
+
+def _build_table_cells(structure: object) -> list[dict[str, Any]]:
+    """Flatten every data cell of every table into
+    ``{text, header, page, bbox}`` records.
+
+    The column header comes from row 1 — opendataloader tags header cells
+    as ``TD`` rather than ``TH``, so the tag can't be used to identify
+    them. ``column span`` is honoured: a header spanning two columns
+    applies to both.
+
+    This is the precise counterpart to :func:`_table_column_label`, which
+    parses Markdown pipe tables. It is used whenever a structure sidecar
+    exists (opendataloader jobs) because it survives formatting quirks
+    and understands merged cells.
+    """
+    tables: list[dict] = []
+
+    def collect(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "table":
+                tables.append(node)
+            for v in node.values():
+                collect(v)
+        elif isinstance(node, list):
+            for v in node:
+                collect(v)
+
+    collect(structure)
+
+    records: list[dict[str, Any]] = []
+    for table in tables:
+        rows = table.get("rows") or []
+        headers: dict[int, str] = {}
+        for row in rows:
+            if row.get("row number") != 1:
+                continue
+            for cell in row.get("cells") or []:
+                col = cell.get("column number")
+                if col is None:
+                    continue
+                label = _cell_text(cell)
+                if not label:
+                    continue
+                for offset in range(max(1, int(cell.get("column span") or 1))):
+                    headers[col + offset] = label
+
+        if not headers:
+            continue  # no usable header row → nothing to attribute
+
+        for row in rows:
+            if row.get("row number") == 1:
+                continue  # the header row itself carries no data values
+            for cell in row.get("cells") or []:
+                text = _cell_text(cell)
+                if not text:
+                    continue
+                header = headers.get(cell.get("column number"))
+                if not header:
+                    continue
+                records.append(
+                    {
+                        "text": text,
+                        "header": header,
+                        "page": cell.get("page number"),
+                        "bbox": cell.get("bounding box"),
+                    }
+                )
+    return records
+
+
+def _enrich_with_table_categories(
+    entities: dict[str, list[dict]],
+    structure: object,
+) -> None:
+    """Re-categorise values that sit inside a structured table cell.
+
+    Overrides the Markdown-derived category because the JSON structure is
+    authoritative: it knows the real column grid including merged cells,
+    where the Markdown parser only sees pipe characters. Values that
+    match several cells are left untouched (ambiguous), and a header
+    without a signal word yields ``unbekannt`` rather than letting the
+    surrounding prose leak in.
+
+    Matching is restricted to cells on the entity's own page. The same
+    figure often appears both in a rate table and later in prose — e.g.
+    "300.000 EUR" as a Versicherungssumme in the table and again as a
+    Sublimit two pages on. Without the page check the table header would
+    wrongly overwrite the prose occurrence.
+    """
+    cells = _build_table_cells(structure)
+    if not cells:
+        return
+
+    for bucket_name, catalogue in (
+        ("amounts", _AMOUNT_CATEGORIES),
+        ("dates", _DATE_CATEGORIES),
+    ):
+        for ent in entities.get(bucket_name, []):
+            raw = ent.get("raw", "")
+            if not raw:
+                continue
+            page = ent.get("page")
+            matches = [
+                c
+                for c in cells
+                if raw in c["text"] and (c["page"] is None or page is None or c["page"] == page)
+            ]
+            if len(matches) != 1:
+                continue
+            ent["category"] = _match_catalogue(f" {matches[0]['header'].lower()} ", catalogue)
+            ent["category_source"] = "table_header"
+
+
 def _walk_structure_elements(node: object, out: list[dict]) -> None:
     if isinstance(node, dict):
         if node.get("content") and node.get("bounding box"):
@@ -472,16 +619,10 @@ def _walk_structure_elements(node: object, out: list[dict]) -> None:
             _walk_structure_elements(v, out)
 
 
-def _enrich_with_bboxes(entities: dict[str, list[dict]], structure_path: Path) -> None:
+def _enrich_with_bboxes(entities: dict[str, list[dict]], data: object) -> None:
     """Best-effort: attach ``bbox`` + ``pdf_page`` from the opendataloader
     structure sidecar to every entity whose raw text appears verbatim in
     exactly one element. Ambiguous or unmatched entities stay bbox-less."""
-    try:
-        data = json.loads(structure_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("structure.json unreadable for bbox enrichment: %s", e)
-        return
-
     elements: list[dict] = []
     _walk_structure_elements(data, elements)
 
@@ -543,7 +684,15 @@ def extract_entities(result: OcrResult, structure_path: Path | None = None) -> d
         entities[key] = unique
 
     if structure_path is not None and structure_path.exists():
-        _enrich_with_bboxes(entities, structure_path)
+        try:
+            structure = json.loads(structure_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("structure.json unreadable — skipping enrichment: %s", e)
+        else:
+            # Table categories first: the JSON grid is authoritative and
+            # overrides whatever the Markdown parser concluded.
+            _enrich_with_table_categories(entities, structure)
+            _enrich_with_bboxes(entities, structure)
 
     entities["meta"] = {
         "counts": {k: len(v) for k, v in entities.items() if isinstance(v, list)},

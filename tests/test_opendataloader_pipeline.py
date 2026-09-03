@@ -139,3 +139,56 @@ def test_inject_bbox_anchors_prepends_anchors_for_known_blocks(tmp_path: Path) -
     # Original markdown must still be intact (anchors are prepended)
     assert "# Wohnungseigentumsgesetz (WEG)" in out
     assert "Vertragsbestandteil AZ120.8" in out
+
+
+# ── Phantom-Seiten durch Separator an den Dokumenträndern ────────────────
+
+
+def test_leading_separator_does_not_create_phantom_page(tmp_path: Path) -> None:
+    """opendataloader setzt den Separator auch VOR die erste Seite. Ohne
+    Behandlung entstünde eine leere Phantom-Seite 1 und alle Seitenzahlen
+    verschöben sich."""
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    md_body = f"{_PAGE_SEPARATOR}Seite eins{_PAGE_SEPARATOR}Seite zwei"
+    tmp_dir = tmp_path / "work"
+
+    with patch("opendataloader_pdf.convert", _fake_convert_factory(md_body, "doc")):
+        result = run_opendataloader(pdf, tmp_dir)
+
+    assert result.page_count == 2
+    assert result.pages_ok == 2
+    assert result.pages_failed == 0
+    assert result.pages[0].number == 1
+    assert result.pages[0].text == "Seite eins"
+    assert result.pages[1].text == "Seite zwei"
+
+
+def test_trailing_separator_does_not_create_phantom_page(tmp_path: Path) -> None:
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    md_body = f"Seite eins{_PAGE_SEPARATOR}Seite zwei{_PAGE_SEPARATOR}"
+    tmp_dir = tmp_path / "work"
+
+    with patch("opendataloader_pdf.convert", _fake_convert_factory(md_body, "doc")):
+        result = run_opendataloader(pdf, tmp_dir)
+
+    assert result.page_count == 2
+    assert result.pages_failed == 0
+
+
+def test_blank_page_in_the_middle_is_still_counted(tmp_path: Path) -> None:
+    """Nur Rand-Artefakte werden entfernt — eine echte Leerseite mitten im
+    Dokument bleibt eine Seite."""
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    md_body = f"{_PAGE_SEPARATOR}eins{_PAGE_SEPARATOR}{_PAGE_SEPARATOR}drei"
+    tmp_dir = tmp_path / "work"
+
+    with patch("opendataloader_pdf.convert", _fake_convert_factory(md_body, "doc")):
+        result = run_opendataloader(pdf, tmp_dir)
+
+    assert result.page_count == 3
+    assert result.pages_ok == 2
+    assert result.pages_failed == 1
+    assert result.pages[1].text is None

@@ -335,3 +335,146 @@ def test_prose_after_table_still_uses_proximity() -> None:
     by_raw = {a["raw"]: a["category"] for a in e["amounts"]}
     assert by_raw["750 EUR"] == "selbstbehalt"
     assert by_raw["1.500.000,00 EUR"] == "versicherungssumme"
+
+
+# ── Kategorien aus der JSON-Tabellenstruktur ─────────────────────────────
+
+
+def _table_structure(*, header_span: int = 1) -> dict:
+    """opendataloader-artige Tabellenstruktur: 1 Headerzeile + 1 Datenzeile."""
+
+    def cell(row: int, col: int, text: str, cspan: int = 1) -> dict:
+        return {
+            "type": "table cell",
+            "page number": 1,
+            "bounding box": [10.0 * col, 100.0 - row, 10.0 * col + 8, 108.0 - row],
+            "row number": row,
+            "column number": col,
+            "row span": 1,
+            "column span": cspan,
+            "kids": [{"type": "paragraph", "content": text}],
+        }
+
+    return {
+        "kids": [
+            {
+                "type": "table",
+                "page number": 1,
+                "number of rows": 2,
+                "number of columns": 3,
+                "rows": [
+                    {
+                        "type": "table row",
+                        "row number": 1,
+                        "cells": [
+                            cell(1, 1, "Position"),
+                            cell(1, 2, "Versicherungssumme", cspan=header_span),
+                            cell(1, 3, "Selbstbehalt")
+                            if header_span == 1
+                            else cell(1, 4, "Anteil"),
+                        ],
+                    },
+                    {
+                        "type": "table row",
+                        "row number": 2,
+                        "cells": [
+                            cell(2, 1, "Feuer"),
+                            cell(2, 2, "1.500.000,00 EUR"),
+                            cell(2, 3, "500 EUR"),
+                        ],
+                    },
+                ],
+            }
+        ]
+    }
+
+
+def test_json_table_header_sets_category(tmp_path: Path) -> None:
+    """Werte in Tabellenzellen bekommen die Kategorie ihres Spaltenheaders."""
+    sp = tmp_path / "structure.json"
+    sp.write_text(json.dumps(_table_structure()))
+    # Markdown ohne Tabellensyntax — die Kategorie kann nur aus der JSON kommen
+    text = "Feuer 1.500.000,00 EUR 500 EUR"
+    e = extract_entities(_result_from_text(text), structure_path=sp)
+
+    by_raw = {a["raw"]: a for a in e["amounts"]}
+    assert by_raw["1.500.000,00 EUR"]["category"] == "versicherungssumme"
+    assert by_raw["1.500.000,00 EUR"]["category_source"] == "table_header"
+    assert by_raw["500 EUR"]["category"] == "selbstbehalt"
+    assert by_raw["500 EUR"]["category_source"] == "table_header"
+
+
+def test_json_table_overrides_markdown_category(tmp_path: Path) -> None:
+    """Die JSON-Struktur ist maßgeblich und korrigiert die Markdown-Heuristik."""
+    sp = tmp_path / "structure.json"
+    sp.write_text(json.dumps(_table_structure()))
+    # Im Fließtext stünde "Selbstbeteiligung" direkt vor dem Betrag …
+    text = "Selbstbeteiligung 1.500.000,00 EUR"
+    e = extract_entities(_result_from_text(text), structure_path=sp)
+    a = e["amounts"][0]
+    # … die Tabellenspalte sagt aber: Versicherungssumme.
+    assert a["category"] == "versicherungssumme"
+    assert a["category_source"] == "table_header"
+
+
+def test_json_table_column_span_applies_header_to_both_columns(tmp_path: Path) -> None:
+    """Ein Header mit column span gilt für alle überspannten Spalten."""
+    sp = tmp_path / "structure.json"
+    sp.write_text(json.dumps(_table_structure(header_span=2)))
+    text = "Feuer 1.500.000,00 EUR 500 EUR"
+    e = extract_entities(_result_from_text(text), structure_path=sp)
+    by_raw = {a["raw"]: a["category"] for a in e["amounts"]}
+    # Spalte 3 ist von "Versicherungssumme" (span=2) mit abgedeckt
+    assert by_raw["500 EUR"] == "versicherungssumme"
+
+
+def test_json_table_ambiguous_value_untouched(tmp_path: Path) -> None:
+    """Kommt der Wert in mehreren Zellen vor, bleibt die Kategorie unberührt."""
+    struct = _table_structure()
+    rows = struct["kids"][0]["rows"]
+    rows[1]["cells"][2]["kids"][0]["content"] = "1.500.000,00 EUR"  # Dublette
+    sp = tmp_path / "structure.json"
+    sp.write_text(json.dumps(struct))
+
+    e = extract_entities(_result_from_text("Beitrag 1.500.000,00 EUR"), structure_path=sp)
+    a = e["amounts"][0]
+    assert a["category"] == "praemie"  # aus dem Fließtext, nicht überschrieben
+    assert a["category_source"] == "proximity"
+
+
+def test_prose_value_keeps_proximity_source(tmp_path: Path) -> None:
+    """Werte außerhalb von Tabellen behalten die Proximity-Kategorie."""
+    sp = tmp_path / "structure.json"
+    sp.write_text(json.dumps(_table_structure()))
+    text = "Feuer 1.500.000,00 EUR 500 EUR. Der Jahresbeitrag beträgt 2.345,-- EUR."
+    e = extract_entities(_result_from_text(text), structure_path=sp)
+    by_raw = {a["raw"]: a for a in e["amounts"]}
+    assert by_raw["2.345,-- EUR"]["category"] == "praemie"
+    assert by_raw["2.345,-- EUR"]["category_source"] == "proximity"
+
+
+def test_category_source_none_when_unknown() -> None:
+    e = extract_entities(_result_from_text("Es wurden 750 EUR erwähnt."))
+    assert e["amounts"][0]["category"] == "unbekannt"
+    assert e["amounts"][0]["category_source"] == "none"
+
+
+def test_json_table_does_not_leak_across_pages(tmp_path: Path) -> None:
+    """Derselbe Betrag in Tabelle (S.1) und Fließtext (S.2): nur der
+    Tabellenwert bekommt die Header-Kategorie."""
+    sp = tmp_path / "structure.json"
+    sp.write_text(json.dumps(_table_structure()))  # Tabelle liegt auf Seite 1
+
+    pages = [
+        PageResult(number=1, text="Feuer 1.500.000,00 EUR", strategy="x", elapsed_s=0.1),
+        PageResult(number=2, text="Sublimit 1.500.000,00 EUR", strategy="x", elapsed_s=0.1),
+    ]
+    result = OcrResult(pages=pages, page_count=2, pages_ok=2, pages_failed=0)
+    e = extract_entities(result, structure_path=sp)
+
+    by_page = {a["page"]: a for a in e["amounts"]}
+    assert by_page[1]["category"] == "versicherungssumme"
+    assert by_page[1]["category_source"] == "table_header"
+    # Seite 2 steht nicht in der Tabelle → Fließtext-Kategorie bleibt
+    assert by_page[2]["category"] == "sublimit"
+    assert by_page[2]["category_source"] == "proximity"

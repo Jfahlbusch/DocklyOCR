@@ -29,6 +29,20 @@ logger = logging.getLogger(__name__)
 
 _CONTEXT_CHARS = 60  # snippet radius around each match
 
+# Our own BBox anchors (injected by the opendataloader pipeline for
+# frontend deep-linking) are ~40 characters long. Left in place they crowd
+# the real words out of the context window and the classifier sees
+# '...bbox-88.1-428.8-280.4-439.6"></a>' instead of "Sublimit:". Strip them
+# before any analysis — result.md keeps them, only the extractor doesn't
+# see them.
+_BBOX_ANCHOR_RE = re.compile(r'<a id="odl-p[0-9.\-]+"></a>\s*')
+
+# PDF text extraction routinely inserts spaces inside words when the
+# original uses wide letter spacing ("Sub limit", "Versicherungssum me").
+# Comparing on a space-free copy of the window makes signal words match
+# regardless.
+_NON_WORD_RE = re.compile(r"[^a-zäöüß]+")
+
 # ── Amounts ──────────────────────────────────────────────────────────────
 # German notation: "." groups thousands, "," starts decimals. A currency
 # marker (before or after) is REQUIRED — a bare number is not an amount.
@@ -88,7 +102,16 @@ _POLICY_RE = re.compile(
 _AMOUNT_CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
     (
         "selbstbehalt",
-        ("selbstbeteiligung", "selbstbehalt", "eigenanteil", " sb ", "sb:", "abzugsfranchise"),
+        (
+            "selbstbeteiligung",
+            "selbstbehalt",
+            "eigenanteil",
+            "eigenbehalt",
+            " sb ",
+            "sb:",
+            "abzugsfranchise",
+            "abzug je schadenfall",
+        ),
     ),
     (
         "praemie",
@@ -116,6 +139,14 @@ _AMOUNT_CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
             "maximal je",
             "max. je",
             "jahreshöchstleistung",
+            "entschädigungsleistung",
+            "entschaedigungsleistung",
+            "höchstens",
+            "hoechstens",
+            "mindestens",
+            "begrenzt",
+            "limitiert auf",
+            "im rahmen von",
         ),
     ),
     (
@@ -127,6 +158,10 @@ _AMOUNT_CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
             "haftungssumme",
             "pauschalsumme",
             "versichert mit",
+            "versicherungssumme je",
+            "deckungssumme der",
+            "pauschal für",
+            "je versicherungsfall",
         ),
     ),
     (
@@ -273,10 +308,24 @@ def _table_column_label(text: str, pos: int) -> str | None:
 
 
 def _match_catalogue(window: str, catalogue: list[tuple[str, tuple[str, ...]]]) -> str:
-    """First matching category in catalogue order, or ``"unbekannt"``."""
+    """First matching category in catalogue order, or ``"unbekannt"``.
+
+    Runs a second pass with all non-letters removed so that signal words
+    survive the spurious spaces PDF extraction inserts inside words
+    ("Sub limit", "Versicherungssum me"). Only needles of 8+ letters take
+    part in that pass — squeezing short ones like " sb " would match
+    inside unrelated words.
+    """
     for category, needles in catalogue:
         if any(n in window for n in needles):
             return category
+
+    squeezed = _NON_WORD_RE.sub("", window.lower())
+    for category, needles in catalogue:
+        for needle in needles:
+            compact = _NON_WORD_RE.sub("", needle.lower())
+            if len(compact) >= 8 and compact in squeezed:
+                return category
     return "unbekannt"
 
 
@@ -333,6 +382,12 @@ def _categorize(
                     best_category, best_distance = category, distance
         if best_distance is not None:
             return best_category, "proximity"
+
+    # Nothing matched literally — retry tolerant of spacing artefacts.
+    for window in (before, after):
+        tolerant = _match_catalogue(window, catalogue)
+        if tolerant != "unbekannt":
+            return tolerant, "proximity"
     return "unbekannt", "none"
 
 
@@ -664,11 +719,15 @@ def extract_entities(result: OcrResult, structure_path: Path | None = None) -> d
         if not pageresult.text:
             continue
         page = pageresult.number
-        entities["amounts"] += _extract_amounts(pageresult.text, page)
-        entities["percentages"] += _extract_percentages(pageresult.text, page)
-        entities["dates"] += _extract_dates(pageresult.text, page)
-        entities["policy_numbers"] += _extract_policy_numbers(pageresult.text, page)
-        entities["references"] += _extract_references(pageresult.text, page)
+        # Strip our own BBox anchors first: they are ~40 characters each
+        # and would otherwise fill the context window, hiding the very
+        # signal words the classifier looks for.
+        text = _BBOX_ANCHOR_RE.sub("", pageresult.text)
+        entities["amounts"] += _extract_amounts(text, page)
+        entities["percentages"] += _extract_percentages(text, page)
+        entities["dates"] += _extract_dates(text, page)
+        entities["policy_numbers"] += _extract_policy_numbers(text, page)
+        entities["references"] += _extract_references(text, page)
 
     # Dedupe: identical (raw, page) pairs appear when a value is repeated
     # inside the same page (e.g. table + footnote) — keep first occurrence.

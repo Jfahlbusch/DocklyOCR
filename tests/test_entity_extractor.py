@@ -478,3 +478,49 @@ def test_json_table_does_not_leak_across_pages(tmp_path: Path) -> None:
     # Seite 2 steht nicht in der Tabelle → Fließtext-Kategorie bleibt
     assert by_page[2]["category"] == "sublimit"
     assert by_page[2]["category_source"] == "proximity"
+
+
+# ── Robustheit gegen eigene Anker und OCR-Trennungen ─────────────────────
+
+
+def test_bbox_anchors_do_not_hide_signal_words() -> None:
+    """Unsere eigenen BBox-Anker sind ~40 Zeichen lang und dürfen das
+    Kontextfenster nicht auffressen."""
+    text = (
+        '<a id="odl-p9-bbox-96.5-394.9-242.2-405.8"></a> '
+        "Selbstbeteiligung: 1.000 EUR je Schadenfall"
+    )
+    e = extract_entities(_result_from_text(text))
+    assert e["amounts"][0]["category"] == "selbstbehalt"
+
+
+def test_signal_word_split_by_ocr_still_matches() -> None:
+    """PDF-Extraktion fügt bei weiter Laufweite Leerzeichen in Wörter ein."""
+    e = extract_entities(_result_from_text("Sub limit: 20.000.000 EUR je Fall"))
+    assert e["amounts"][0]["category"] == "sublimit"
+
+
+def test_versicherungssumme_split_by_ocr() -> None:
+    e = extract_entities(_result_from_text("Versicherungssum me: 5.000.000 EUR"))
+    assert e["amounts"][0]["category"] == "versicherungssumme"
+
+
+def test_short_needles_not_squeezed() -> None:
+    """Kurze Signalwörter wie ' sb ' dürfen nicht in fremden Wörtern
+    matchen — sonst würde 'Absberg' zu selbstbehalt."""
+    e = extract_entities(_result_from_text("In Absberg wurden 750 EUR verbucht."))
+    assert e["amounts"][0]["category"] == "unbekannt"
+
+
+def test_eigenbehalt_recognised() -> None:
+    e = extract_entities(
+        _result_from_text("Ein genereller unversicherter Eigenbehalt von 1.000 EUR")
+    )
+    assert e["amounts"][0]["category"] == "selbstbehalt"
+
+
+def test_entschaedigungsleistung_is_sublimit() -> None:
+    e = extract_entities(
+        _result_from_text("Die Entschädigungsleistung ist auf max. 10.000 EUR begrenzt")
+    )
+    assert e["amounts"][0]["category"] == "sublimit"

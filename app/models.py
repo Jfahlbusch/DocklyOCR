@@ -10,6 +10,7 @@ Implements the data model from `OCR-API-Projekt-Anforderungen.md` §3:
 import uuid
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -37,6 +38,14 @@ class OutputFormat(str, Enum):  # noqa: UP042 -- spec mandates `(str, Enum)` for
     txt = "txt"
     toon = "toon"
     json = "json"
+
+
+# Motor, den ein Aufrufer beim Einreichen VERLANGEN kann (A45). ``auto`` ist
+# das bisherige Verhalten (Router entscheidet, vLLM-Fallback erlaubt). Als
+# Literal statt Enum, weil der Wert nur durchgereicht wird — kein Zustand,
+# keine Übergänge.
+REQUESTED_ENGINES = ("auto", "opendataloader", "vllm")
+RequestedEngine = Literal["auto", "opendataloader", "vllm"]
 
 
 def _new_uuid_hex() -> str:
@@ -111,6 +120,15 @@ class Job(SQLModel, table=True):
     # Caller asked for DSGVO-style pseudonymisation. Only honoured by the
     # opendataloader engine (vllm doesn't expose a sanitize switch).
     sanitize: bool = Field(default=False)
+    # Motor, den der Aufrufer VERLANGT hat (A45, DocklyStorage-Integration):
+    #   ``auto``           — Router entscheidet (digitales PDF → opendataloader,
+    #                        sonst vLLM), inkl. Fallback auf vLLM.
+    #   ``opendataloader`` — CPU-Parser erzwungen. KEIN Fallback, KEIN
+    #                        GPU-Start: ein PDF ohne Textebene scheitert laut,
+    #                        statt still GPU-Zeit zu kosten.
+    #   ``vllm``           — Vision-Pipeline erzwungen.
+    # ``engine`` oben hält davon unabhängig fest, was tatsächlich gelaufen ist.
+    requested_engine: str = Field(default="auto")
 
     customer: Customer | None = Relationship(back_populates="jobs")
 

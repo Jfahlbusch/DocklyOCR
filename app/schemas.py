@@ -138,6 +138,11 @@ class JobDetailResponse(BaseModel):
         examples=["opendataloader", "vllm", "vllm-fallback-after-opendataloader"],
         description="OCR engine that produced the result. ``opendataloader`` runs CPU-only on digital PDFs; ``vllm`` is the vision-LLM pipeline used for images and scans.",
     )
+    requested_engine: str = Field(
+        default="auto",
+        examples=["auto", "opendataloader", "vllm"],
+        description="Engine the caller asked for at submit time. ``auto`` lets the router decide (with vLLM fallback); ``opendataloader`` pins the CPU parser and disables fallback and GPU start; ``vllm`` forces the vision pipeline. Compare with ``engine`` to see what actually ran.",
+    )
     structure_url: str | None = Field(
         default=None,
         examples=["/v1/jobs/7c9e6f8d5b2a4e1c9d8f3a6b7e5c2d1a/structure"],

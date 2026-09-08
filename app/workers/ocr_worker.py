@@ -67,10 +67,14 @@ async def process_ocr_job(ctx, job_id: str) -> str:
             session.commit()
             return "missing_input"
 
-        # Pick the cheap engine first: digital PDFs go to opendataloader
-        # on CPU (no GPU spin-up). Images and scanned PDFs go straight
-        # to the vLLM pipeline.
-        planned_engine = select_engine(input_path)
+        # Which engine to run. ``auto`` (the default) keeps the router's
+        # choice: digital PDFs go to opendataloader on CPU (no GPU
+        # spin-up), images and scanned PDFs straight to vLLM. A pinned
+        # engine skips the router entirely — the caller has decided.
+        requested_engine = getattr(job, "requested_engine", "auto") or "auto"
+        planned_engine = (
+            select_engine(input_path) if requested_engine == "auto" else requested_engine
+        )
 
         try:
             with tempfile.TemporaryDirectory(prefix=f"ocr_{job_id}_") as tmp_dir_str:
@@ -128,6 +132,23 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                     # CPU-only — no GPU touch.
                     rc = _run_subprocess("opendataloader", backend_url=None)
                     if rc == EXIT_OPENDATALOADER_UNACCEPTABLE:
+                        if requested_engine == "opendataloader":
+                            # The caller pinned the CPU parser: no vLLM
+                            # fallback and — just as important — no GPU
+                            # start. Fail loudly with a message that says
+                            # what to do instead.
+                            job.status = JobStatus.failed
+                            job.error_message = (
+                                "opendataloader konnte keinen verwertbaren Text lesen: das PDF "
+                                "hat keine ausreichende Textebene (vermutlich ein Scan). Da "
+                                "engine=opendataloader ausdrücklich verlangt wurde, gibt es "
+                                "keinen KI-Fallback."
+                            )
+                            job.engine = "opendataloader"
+                            job.finished_at = datetime.utcnow()
+                            session.add(job)
+                            session.commit()
+                            return "opendataloader_unacceptable"
                         # The text-layer probe said yes, but the actual
                         # extraction was too sparse → fall back to vllm.
                         try:

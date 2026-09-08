@@ -57,6 +57,7 @@ def _job_to_response(job: Job) -> JobDetailResponse:
         backend_model=job.backend_model,
         backend_instance=job.backend_instance,
         engine=job.engine,
+        requested_engine=job.requested_engine,
         result_url=result_url,
         structure_url=structure_url,
         preview_url=preview_url,

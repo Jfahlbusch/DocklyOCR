@@ -55,13 +55,34 @@ engine = create_engine(
 )
 
 
+# Spalten, die NACH der ersten Auslieferung zu bestehenden Tabellen dazukamen.
+# ``create_all`` legt nur fehlende TABELLEN an — eine später ergänzte Spalte
+# erreicht eine Datenbank, die die Tabelle schon hat, nie von selbst. Prod
+# trägt genau so eine Datei. Jeder Eintrag ist ein ALTER TABLE, das nur läuft,
+# wenn die Spalte fehlt — gefahrlos bei jedem Start wiederholbar.
+_ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("job", "requested_engine", "VARCHAR NOT NULL DEFAULT 'auto'"),
+)
+
+
+def _ensure_columns() -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        for table, column, ddl in _ADDITIVE_COLUMNS:
+            present = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            if column not in present:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db() -> None:
-    """Create all tables (idempotent)."""
+    """Create all tables and add columns that arrived later (idempotent)."""
     # Importing models here ensures their metadata is registered with SQLModel
     # before `create_all` runs, even if `db.py` is imported before `models.py`.
     from app import models  # noqa: F401
 
     SQLModel.metadata.create_all(engine)
+    _ensure_columns()
 
 
 def get_session() -> Iterator[Session]:

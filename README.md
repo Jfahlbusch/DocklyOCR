@@ -133,6 +133,22 @@ curl -X POST http://localhost:8000/v1/ocr \
 
 When done, DocklyOCR `POST`s to the webhook URL with the result URL and metadata. If `customer.webhook_secret` is set, the request carries `X-Signature: sha256=<hex>` (HMAC-SHA256 of the body).
 
+### Pinning the engine (no AI)
+
+```bash
+curl -X POST http://localhost:8000/v1/ocr \
+  -H "X-API-Key: sk_live_xxx" \
+  -F "file=@digital.pdf" \
+  -F "output_format=md" \
+  -F "engine=opendataloader"
+```
+
+`engine` is `auto` by default (router decides, vLLM fallback allowed).
+`opendataloader` pins the CPU parser and disables **both** the fallback and any
+GPU start — a PDF without a usable text layer then fails with a clear
+`error_message` instead of silently costing GPU time. `vllm` forces the vision
+pipeline. `GET /v1/jobs/{id}` reports `requested_engine` next to `engine`.
+
 ### Batch — multiple files in one request
 
 ```bash

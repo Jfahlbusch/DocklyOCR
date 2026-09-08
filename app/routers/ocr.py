@@ -23,7 +23,7 @@ from app.auth import ApiKeyContext, enforce_rate_limit
 from app.config import settings
 from app.db import get_session
 from app.http_utils import content_disposition_attachment
-from app.models import Job, JobStatus, OutputFormat
+from app.models import Job, JobStatus, OutputFormat, RequestedEngine
 from app.schemas import ErrorResponse, OcrAsyncResponse
 from app.services.formatters import format_output
 from app.services.ocr_pipeline import run_ocr
@@ -85,6 +85,14 @@ field:
 ``txt`` (plain text), ``toon`` (TOON tree notation), ``json`` (structured
 pipeline result). The sync response's ``Content-Type`` reflects the chosen
 format.
+
+**Engine** (``engine`` form field): ``auto`` *(default)* lets the router
+decide — digital PDFs go to the CPU-only ``opendataloader`` parser, scans and
+images to the ``vllm`` vision model, with an automatic vLLM fallback if the
+parser finds too little text. ``opendataloader`` **pins** the CPU parser and
+disables both the fallback and any GPU start: a PDF without a usable text
+layer then fails with a clear error instead of silently costing GPU time.
+``vllm`` forces the vision pipeline.
 
 **Webhook delivery (async mode):** if ``webhook_url`` is supplied, the
 worker POSTs the final job payload to that URL on completion. Delivery is
@@ -199,6 +207,7 @@ async def submit_ocr(
     mode: Literal["sync", "async"] = Form("async"),
     webhook_url: str | None = Form(None),
     sanitize: bool = Form(False),
+    engine: RequestedEngine = Form("auto"),  # noqa: B008 -- FastAPI dep pattern
     ctx: ApiKeyContext = Depends(enforce_rate_limit),  # noqa: B008 -- FastAPI dep pattern
     session: Session = Depends(get_session),  # noqa: B008 -- FastAPI dep pattern
 ):
@@ -250,6 +259,7 @@ async def submit_ocr(
         output_format=fmt_enum,
         webhook_url=webhook_url,
         sanitize=sanitize,
+        requested_engine=engine,
     )
     session.add(job)
     session.commit()
@@ -421,6 +431,7 @@ async def submit_ocr_batch(
     output_format: str = Form(...),
     webhook_url: str | None = Form(None),
     sanitize: bool = Form(False),
+    engine: RequestedEngine = Form("auto"),  # noqa: B008 -- FastAPI dep pattern
     ctx: ApiKeyContext = Depends(enforce_rate_limit),  # noqa: B008
     session: Session = Depends(get_session),  # noqa: B008
 ):
@@ -490,6 +501,7 @@ async def submit_ocr_batch(
             output_format=fmt_enum,
             webhook_url=webhook_url,
             sanitize=sanitize,
+            requested_engine=engine,
         )
         session.add(job)
         session.commit()

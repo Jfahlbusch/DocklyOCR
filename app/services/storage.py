@@ -124,6 +124,29 @@ class LocalStorage:
         p = job_dir / "preview.html"
         return p if p.exists() else None
 
+    def save_layout(self, job_id: str, body: bytes) -> Path:
+        """Store the ``pdftotext -layout`` sidecar.
+
+        Plain text that keeps the page's horizontal layout — every value
+        sits at the character column it occupies in the PDF, pages are
+        separated by form feeds. Only present for ``engine=opendataloader``
+        jobs (a text layer is required). Consumers that need column
+        positions (DocklyStorage's PDF→Excel rule for DATEV-style reports
+        without table rulings) read this instead of the markdown.
+        """
+        job_dir = self.base_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        path = job_dir / "layout.txt"
+        path.write_bytes(body)
+        return path
+
+    def get_layout_path(self, job_id: str) -> Path | None:
+        job_dir = self.base_dir / job_id
+        if not job_dir.exists():
+            return None
+        p = job_dir / "layout.txt"
+        return p if p.exists() else None
+
     def delete_job(self, job_id: str) -> None:
         job_dir = self.base_dir / job_id
         if job_dir.exists():

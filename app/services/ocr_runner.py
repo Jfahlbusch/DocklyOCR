@@ -57,6 +57,12 @@ def main() -> int:
         help="Write the opendataloader HTML preview sidecar to this path (opendataloader only).",
     )
     parser.add_argument(
+        "--layout-path",
+        type=Path,
+        default=None,
+        help="Write the pdftotext -layout sidecar to this path (opendataloader only).",
+    )
+    parser.add_argument(
         "--sanitize",
         action="store_true",
         help="When using opendataloader, replace emails/phones/IPs/etc. with placeholders.",
@@ -91,6 +97,7 @@ def main() -> int:
             structure_path=args.structure_path,
             html_path=args.html_path,
             sanitize=args.sanitize,
+            layout_path=args.layout_path,
         )
         if not is_result_acceptable(result):
             # Signal the worker that a vllm fallback is needed. We do

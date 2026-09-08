@@ -88,6 +88,7 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                 # only emitted by the opendataloader engine.
                 structure_path = storage.base_dir / job_id / "structure.json"
                 html_path = storage.base_dir / job_id / "preview.html"
+                layout_path = storage.base_dir / job_id / "layout.txt"
 
                 def _run_subprocess(engine: str, backend_url: str | None) -> int:
                     cmd = [
@@ -115,6 +116,8 @@ async def process_ocr_job(ctx, job_id: str) -> str:
                             str(structure_path),
                             "--html-path",
                             str(html_path),
+                            "--layout-path",
+                            str(layout_path),
                         ]
                         if job.sanitize:
                             cmd += ["--sanitize"]

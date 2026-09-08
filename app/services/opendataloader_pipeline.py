@@ -12,6 +12,7 @@ and CPU-only (no GPU activation needed).
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from pathlib import Path
 
@@ -95,6 +96,7 @@ def run_opendataloader(
     structure_path: Path | None = None,
     html_path: Path | None = None,
     sanitize: bool = False,
+    layout_path: Path | None = None,
 ) -> OcrResult:
     """Run opendataloader-pdf against a digital PDF.
 
@@ -109,6 +111,12 @@ def run_opendataloader(
         structure_path: When set, the full JSON sidecar (one entry per
             element with bounding boxes, page numbers, heading levels,
             tables, fonts) is written here as well.
+        layout_path: When set, ``pdftotext -layout`` output is written
+            here — the text with its horizontal positions preserved. Needed
+            by consumers that must map numbers to column headings in
+            reports without table rulings (opendataloader emits those as
+            flowing text). Best-effort: a missing/failing ``pdftotext``
+            logs a warning and skips the sidecar.
         sanitize: When True, opendataloader replaces e-mail addresses,
             phone numbers, IPs, credit card numbers and URLs with
             placeholders in the output. Useful for DSGVO-sensitive
@@ -199,6 +207,23 @@ def run_opendataloader(
             logger.warning(
                 "opendataloader did not produce HTML in %s — skipping preview sidecar",
                 tmp_dir,
+            )
+
+    # Layout sidecar: poppler's pdftotext keeps the columns where they are.
+    # Same tool the engine router already relies on for the text-layer
+    # probe, so it is guaranteed to be present in the API image.
+    if layout_path is not None:
+        try:
+            layout_path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["pdftotext", "-layout", str(input_path), str(layout_path)],
+                capture_output=True,
+                timeout=120,
+                check=True,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+            logger.warning(
+                "pdftotext -layout failed for %s: %s — skipping layout sidecar", input_path.name, e
             )
 
     # Inject bounding-box anchors into the markdown so frontends can map

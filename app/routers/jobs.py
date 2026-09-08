@@ -28,6 +28,7 @@ def _job_to_response(job: Job) -> JobDetailResponse:
     structure_url: str | None = None
     preview_url: str | None = None
     entities_url: str | None = None
+    layout_url: str | None = None
     if job.status == JobStatus.done:
         result_url = f"/v1/jobs/{job.id}/result"
         # Structure JSON is opendataloader-only (vLLM has no bounding boxes).
@@ -42,6 +43,9 @@ def _job_to_response(job: Job) -> JobDetailResponse:
         # Entities sidecar is engine-agnostic — exposed whenever present.
         if storage.get_entities_path(job.id) is not None:
             entities_url = f"/v1/jobs/{job.id}/entities"
+        # Layout sidecar: pdftotext -layout, opendataloader-only (text layer).
+        if storage.get_layout_path(job.id) is not None:
+            layout_url = f"/v1/jobs/{job.id}/layout"
     return JobDetailResponse(
         job_id=job.id,
         status=job.status,
@@ -62,6 +66,7 @@ def _job_to_response(job: Job) -> JobDetailResponse:
         structure_url=structure_url,
         preview_url=preview_url,
         entities_url=entities_url,
+        layout_url=layout_url,
         webhook_url=job.webhook_url,
         webhook_delivered=job.webhook_delivered,
         webhook_attempts=job.webhook_attempts,
@@ -441,4 +446,58 @@ async def get_job_entities(
         path=str(entities_path),
         media_type="application/json",
         headers={"Content-Disposition": content_disposition_attachment(f"{stem}.entities.json")},
+    )
+
+
+_GET_LAYOUT_DESCRIPTION = """
+Download the ``pdftotext -layout`` sidecar for a completed opendataloader
+job: the document text with its horizontal positions preserved (one line
+per text line, pages separated by form feeds).
+
+This is what a consumer needs to map numbers to column headings in reports
+that have no table rulings — DATEV-style BWAs, for example — where the
+Markdown result can only carry the numbers of a line, not their columns.
+Deterministic poppler output, no model involved.
+
+Returns ``404 Not Found`` for jobs served by the vLLM engine (no text layer)
+or if the sidecar was evicted by retention.
+"""
+
+
+@router.get(
+    "/jobs/{job_id}/layout",
+    summary="Download job layout sidecar (pdftotext -layout, opendataloader only)",
+    description=_GET_LAYOUT_DESCRIPTION,
+    response_model=None,
+    responses={
+        200: {"description": "Layout-preserving plain text.", "content": {"text/plain": {}}},
+        401: {"model": ErrorResponse, "description": "Missing or invalid ``X-API-Key`` header."},
+        404: {
+            "model": ErrorResponse,
+            "description": "No matching job, or no layout sidecar (vLLM-served jobs).",
+        },
+        409: {"model": ErrorResponse, "description": "Job is still processing."},
+    },
+)
+async def get_job_layout(
+    job_id: str,
+    ctx: ApiKeyContext = Depends(require_api_key),  # noqa: B008
+    session: Session = Depends(get_session),  # noqa: B008
+):
+    job = session.get(Job, job_id)
+    if job is None or job.customer_id != ctx.customer.id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != JobStatus.done:
+        raise HTTPException(status_code=409, detail="Result not ready")
+    layout_path = storage.get_layout_path(job_id)
+    if layout_path is None or not layout_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Layout sidecar not available (only produced by the opendataloader engine)",
+        )
+    stem = Path(job.input_filename).stem or "layout"
+    return FileResponse(
+        path=str(layout_path),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": content_disposition_attachment(f"{stem}.layout.txt")},
     )

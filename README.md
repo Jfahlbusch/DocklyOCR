@@ -173,6 +173,15 @@ curl -H "X-API-Key: sk_live_xxx" http://localhost:8000/v1/jobs/<job_id>
 curl -H "X-API-Key: sk_live_xxx" http://localhost:8000/v1/jobs/<job_id>/result -o result.json
 ```
 
+### Sidecars (opendataloader jobs)
+
+| URL | Content |
+|---|---|
+| `/v1/jobs/{id}/structure` | JSON with per-element bounding boxes, headings, tables |
+| `/v1/jobs/{id}/preview` | HTML preview with inline bounding-box markers |
+| `/v1/jobs/{id}/entities` | extracted values (amounts, dates, percentages) — every engine |
+| `/v1/jobs/{id}/layout` | `pdftotext -layout` text: values keep their character columns, pages separated by form feeds — for mapping numbers to headings in reports without table rulings |
+
 ## Output Formats
 
 | Format | MIME | Use case |
